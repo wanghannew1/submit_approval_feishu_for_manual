@@ -66,12 +66,12 @@ DEFAULT_CONFIG = {
         "title_unit_patterns": [],
         "columns": {
             "transfer_total": {
-                "keywords": ["转账合计", "转款合计"],
-                "label": "转账合计(元)"
+                "keywords": ["转款合计"],
+                "label": "转款合计"
             },
             "deduction_total": {
                 "keywords": ["扣款合计"],
-                "label": "扣款合计(五险一金、单位代理费)"
+                "label": "扣款合计"
             },
             "personal_tax": {
                 "keywords": ["个人所得税", "个税"],
@@ -99,7 +99,7 @@ DEFAULT_CONFIG = {
             },
             "net_total": {
                 "keywords": ["实发工资"],
-                "label": "实发工资(元)"
+                "label": "实发工资"
             },
             "tax_and_fee": {
                 "keywords": ["税费"],
@@ -133,7 +133,7 @@ DEFAULT_CONFIG = {
         ],
         "row_formulas": [
             {
-                "name": "转账合计 = 扣款合计 + 个人所得税 + 个人其他调整 + 个人欠款 + 个人承担代理费 + 扣工会会费 - 交纳现金 + 实发工资",
+                "name": "转款合计 = 扣款合计 + 个人所得税 + 个人其他调整 + 个人欠款 + 个人承担代理费 + 扣工会会费 - 交纳现金 + 实发工资",
                 "lhs": "transfer_total",
                 "rhs_plus": ["deduction_total", "personal_tax", "adjustment", "personal_debt", "personal_proxy_fee", "union_fee", "net_total"],
                 "rhs_minus": ["pay_cash"]
@@ -157,16 +157,16 @@ DEFAULT_CONFIG = {
             {"key": "report_name", "label": "报表名称"},
             {"key": "party_a_transfer", "label": "甲方转款"},
             {"key": "overpayment_offset", "label": "溢缴款抵扣"},
-            {"key": "transfer_total", "label": "转账合计(元)"},
-            {"key": "tax_and_fee", "label": "税费(元)"},
-            {"key": "deduction_total", "label": "扣款合计(五险一金、单位代理费)"},
+            {"key": "transfer_total", "label": "转款合计"},
+            {"key": "tax_and_fee", "label": "税费"},
+            {"key": "deduction_total", "label": "扣款合计"},
             {"key": "personal_tax", "label": "个人所得税"},
             {"key": "personal_debt", "label": "个人欠款"},
             {"key": "pay_cash", "label": "交纳现金"},
             {"key": "personal_proxy_fee", "label": "个人承担代理费"},
             {"key": "union_fee", "label": "扣工会会费"},
             {"key": "adjustment", "label": "个人其他调整"},
-            {"key": "net_total", "label": "实发工资(元)"}
+            {"key": "net_total", "label": "实发工资"}
         ]
     },
     "ui": {

@@ -33,16 +33,15 @@
     "columns": {
       "transfer_total": {
         "keywords": [
-          "转账合计",
           "转款合计"
         ],
-        "label": "转账合计(元)"
+        "label": "转款合计"
       },
       "deduction_total": {
         "keywords": [
           "扣款合计"
         ],
-        "label": "扣款合计(五险一金、单位代理费)"
+        "label": "扣款合计"
       },
       "personal_tax": {
         "keywords": [
@@ -87,7 +86,7 @@
         "keywords": [
           "实发工资"
         ],
-        "label": "实发工资(元)"
+        "label": "实发工资"
       },
       "tax_and_fee": {
         "keywords": [
@@ -139,7 +138,7 @@
     ],
     "row_formulas": [
       {
-        "name": "转账合计 = 扣款合计 + 个人所得税 + 个人其他调整 + 个人欠款 + 个人承担代理费 + 扣工会会费 - 交纳现金 + 实发工资",
+        "name": "转款合计 = 扣款合计 + 个人所得税 + 个人其他调整 + 个人欠款 + 个人承担代理费 + 扣工会会费 - 交纳现金 + 实发工资",
         "lhs": "transfer_total",
         "rhs_plus": [
           "deduction_total",
@@ -191,15 +190,15 @@
       },
       {
         "key": "transfer_total",
-        "label": "转账合计(元)"
+        "label": "转款合计"
       },
       {
         "key": "tax_and_fee",
-        "label": "税费(元)"
+        "label": "税费"
       },
       {
         "key": "deduction_total",
-        "label": "扣款合计(五险一金、单位代理费)"
+        "label": "扣款合计"
       },
       {
         "key": "personal_tax",
@@ -227,7 +226,7 @@
       },
       {
         "key": "net_total",
-        "label": "实发工资(元)"
+        "label": "实发工资"
       }
     ]
   },
