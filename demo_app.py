@@ -48,18 +48,14 @@ load_dotenv()
 
 DEFAULT_CONFIG = {
     "excel": {
-        "title_row": 1,           # 报表名所在行（1-based）
-        "unit_name_row": 2,       # 单位名所在行（1-based）；0 表示无此行，单位名从标题行用正则提取
-        "header_start_row": 3,    # 表头起始行（1-based）
-        "header_row_count": 3,    # 表头占几行（适配多级合并表头）
+        "title_row": 1,
+        "unit_name_row": 0,
+        "header_start_row": 2,
+        "header_row_count": 3,
         "summary_row_marker": "合计",
         "unit_name_patterns": [
             r"(?:单位名称[：:]|[名称][：:]\s*)(.+?)(?:\s|$)"
         ],
-        # 从标题行提取单位名（unit_name_row=0 时启用）
-        # 算法：枚举标题里每个后缀的所有出现位置，从该位置向左扩展（只接受 ALLOWED 里的字符），
-        # 得到所有候选后取「最长」一个。能正确处理「...有限公司净月团餐—分公司」这种嵌套后缀。
-        # title_unit_patterns 是高级正则逃生口：若配置非空，则按列表里第一个能 search 命中的 group(1) 直接返回。
         "title_unit_suffixes": [
             "有限公司", "股份公司", "分公司", "公司", "集团",
             "医院", "卫生院", "诊所",
@@ -70,24 +66,20 @@ DEFAULT_CONFIG = {
         "title_unit_patterns": [],
         "columns": {
             "transfer_total": {
-                "keywords": ["转账合计"],
-                "label": "转账合计（元）"
+                "keywords": ["转账合计", "转款合计"],
+                "label": "转账合计(元)"
             },
             "deduction_total": {
-                "keywords": ["扣款合计", "扣款"],
-                "label": "扣款合计（五险一金、单位代理费）"
-            },
-            "net_total": {
-                "keywords": ["实发合计", "实发工资", "实发"],
-                "label": "实发合计（元）"
+                "keywords": ["扣款合计"],
+                "label": "扣款合计(五险一金、单位代理费)"
             },
             "personal_tax": {
-                "keywords": ["个税", "个人所得税"],
+                "keywords": ["个人所得税", "个税"],
                 "label": "个人所得税"
             },
             "adjustment": {
-                "keywords": ["调差", "差额调整", "调整差额", "工伤差额", "返还差额"],
-                "label": "调差"
+                "keywords": ["个人其他调整"],
+                "label": "个人其他调整"
             },
             "personal_debt": {
                 "keywords": ["个人欠款"],
@@ -105,43 +97,81 @@ DEFAULT_CONFIG = {
                 "keywords": ["交纳现金", "缴纳现金"],
                 "label": "交纳现金"
             },
-            "service_fee": {
-                "keywords": ["服务费", "代理费", "管理费"],
-                "label": "服务费"
+            "net_total": {
+                "keywords": ["实发工资"],
+                "label": "实发工资(元)"
             },
-            "employer_insurance": {
-                "keywords": ["单位缴纳", "单位社保", "单位五险一金"],
-                "label": "单位缴纳"
+            "tax_and_fee": {
+                "keywords": ["税费"],
+                "label": "税费"
+            }
+        },
+        "extra_summary_rows": {
+            "overpayment_offset": {
+                "keywords": ["溢缴款抵扣"],
+                "label": "溢缴款抵扣"
+            },
+            "party_a_transfer": {
+                "keywords": ["甲方转款"],
+                "label": "甲方转款"
             }
         }
     },
     "validation": {
-        "enabled": False,
+        "enabled": True,
         "strict": True,
         "tolerance": 0.00,
         "write_back_sheet": True,
         "write_back_sheet_name": "验证结果",
-        "column_sum_checks": [],
-        "row_formulas": []
+        "column_sum_checks": [
+            {"column": "deduction_total"},
+            {"column": "personal_tax"},
+            {"column": "adjustment"},
+            {"column": "pay_cash"},
+            {"column": "net_total"},
+            {"column": "tax_and_fee"}
+        ],
+        "row_formulas": [
+            {
+                "name": "转账合计 = 扣款合计 + 个人所得税 + 个人其他调整 + 个人欠款 + 个人承担代理费 + 扣工会会费 - 交纳现金 + 实发工资",
+                "lhs": "transfer_total",
+                "rhs_plus": ["deduction_total", "personal_tax", "adjustment", "personal_debt", "personal_proxy_fee", "union_fee", "net_total"],
+                "rhs_minus": ["pay_cash"]
+            }
+        ],
+        "extra_summary_checks": [
+            {
+                "name": "转款合计 = 溢缴款抵扣 + 甲方转款",
+                "column": "transfer_total",
+                "lhs_row_key": "summary",
+                "rhs_plus_row_keys": ["overpayment_offset", "party_a_transfer"],
+                "rhs_minus_row_keys": []
+            }
+        ],
+        "required_signatures": [
+            ["总经理签字", "财务审核", "业务审核"]
+        ]
     },
     "table_field": {
         "columns": [
             {"key": "report_name", "label": "报表名称"},
-            {"key": "unit_name", "label": "甲方单位项目名称"},
-            {"key": "transfer_total", "label": "转账合计（元）"},
-            {"key": "deduction_total", "label": "扣款合计（五险一金、单位代理费）"},
-            {"key": "personal_tax", "label": "个人所得税合计"},
-            {"key": "adjustment", "label": "其他调整合计"},
+            {"key": "party_a_transfer", "label": "甲方转款"},
+            {"key": "overpayment_offset", "label": "溢缴款抵扣"},
+            {"key": "transfer_total", "label": "转账合计(元)"},
+            {"key": "tax_and_fee", "label": "税费(元)"},
+            {"key": "deduction_total", "label": "扣款合计(五险一金、单位代理费)"},
+            {"key": "personal_tax", "label": "个人所得税"},
             {"key": "personal_debt", "label": "个人欠款"},
+            {"key": "pay_cash", "label": "交纳现金"},
             {"key": "personal_proxy_fee", "label": "个人承担代理费"},
             {"key": "union_fee", "label": "扣工会会费"},
-            {"key": "pay_cash", "label": "交纳现金"},
-            {"key": "net_total", "label": "实发合计（元）"}
+            {"key": "adjustment", "label": "个人其他调整"},
+            {"key": "net_total", "label": "实发工资(元)"}
         ]
     },
     "ui": {
-        "template_name": "工资发放审批",
-        "description": "请上传 Excel 工资表，系统将自动解析数据并提交飞书 OA 审批流程。"
+        "template_name": "工资发放审批(手工做表)",
+        "description": "上传手工编写的工资发放表,自动校验转账合计/扣款合计/个税/实发工资等数值并提交飞书OA审批"
     }
 }
 
@@ -548,6 +578,9 @@ def parse_excel(file_bytes, filename):
         # 兜底也要把 excel.columns 里所有列填上 "0.00"，避免下游 KeyError
         for col_key in excel_cfg.get("columns", {}):
             fallback.setdefault(col_key, "0.00")
+        fallback.setdefault("extra_summary_values", {})
+        fallback.setdefault("party_a_transfer", "0.00")
+        fallback.setdefault("overpayment_offset", "0.00")
         return fallback
 
     # Header rows from config (1-based start, N rows)
@@ -630,6 +663,38 @@ def parse_excel(file_bytes, filename):
             continue
         data_rows.append(r)
 
+    # 读取额外汇总行（位于合计行之后，如"溢缴款抵扣"、"甲方转款"）
+    extra_summary_cfg = excel_cfg.get("extra_summary_rows", {})
+    extra_summary_values = {}
+    if extra_summary_cfg:
+        for ridx in range(summary_row_idx + 1, len(rows)):
+            row = rows[ridx]
+            if not row or row[0] is None:
+                continue
+            first_cell = re.sub(r"\s+", "", str(row[0]))
+            for row_key, row_def in extra_summary_cfg.items():
+                if row_key in extra_summary_values:
+                    continue  # 已匹配过，跳过
+                keywords = row_def.get("keywords", [])
+                for kw in keywords:
+                    kw_normalized = re.sub(r"\s+", "", kw)
+                    if kw_normalized in first_cell:
+                        row_values = {}
+                        for col_key, cidx in column_indices.items():
+                            if cidx >= 0 and cidx < len(row):
+                                v = row[cidx]
+                                if v is None:
+                                    row_values[col_key] = "0.00"
+                                else:
+                                    try:
+                                        row_values[col_key] = f"{float(v):.2f}"
+                                    except (ValueError, TypeError):
+                                        row_values[col_key] = str(v).strip() or "0.00"
+                            else:
+                                row_values[col_key] = "0.00"
+                        extra_summary_values[row_key] = row_values
+                        break
+
     result = {
         "report_name": report_name,
         "unit_name": unit_name,
@@ -640,10 +705,37 @@ def parse_excel(file_bytes, filename):
         "column_indices": column_indices,
         "summary_row": summary_row,
         "data_rows": data_rows,
+        "extra_summary_values": extra_summary_values,
     }
     # 把 excel.columns 里所有列的合计值都加上（包括 transfer/deduction/net）
     # 这样 table_field 可以引用任意已配置的列
     result.update(column_summary_values)
+    # 把额外汇总行的 transfer_total 值展平到顶层，方便 table_field 引用
+    for row_key, row_values in extra_summary_values.items():
+        result[row_key] = row_values.get("transfer_total", "0.00")
+
+    # 智能填充缺失的额外汇总行：
+    #   转款合计 = 溢缴款抵扣 + 甲方转款
+    #   如果甲方转款不存在 → 甲方转款 = 转款合计 - 溢缴款抵扣(如有)
+    #   如果溢缴款抵扣不存在 → 溢缴款抵扣 = 0
+    transfer_total_val = result.get("transfer_total", "0.00")
+    has_overpayment = "overpayment_offset" in extra_summary_values
+    has_party_a = "party_a_transfer" in extra_summary_values
+
+    if not has_party_a:
+        try:
+            ov = float(
+                extra_summary_values.get("overpayment_offset", {}).get("transfer_total", "0.00")
+                if has_overpayment else "0.00"
+            )
+            tt = float(transfer_total_val)
+            result["party_a_transfer"] = f"{tt - ov:.2f}"
+        except (ValueError, TypeError):
+            result["party_a_transfer"] = transfer_total_val
+
+    if not has_overpayment:
+        result["overpayment_offset"] = "0.00"
+
     return result
 
 
@@ -809,6 +901,78 @@ def validate_payroll(parsed, validation_cfg, excel_cols):
             "detail": detail
         })
 
+    extra_summary_values = parsed.get("extra_summary_values", {})
+
+    def extra_row_value(row_key, col_key):
+        row_data = extra_summary_values.get(row_key)
+        if row_data is None:
+            return None
+        val = row_data.get(col_key, "0.00")
+        try:
+            return round(float(val), 2)
+        except (ValueError, TypeError):
+            return 0.0
+
+    for check in validation_cfg.get("extra_summary_checks", []) or []:
+        name = check.get("name", "<未命名校验>")
+        col = check.get("column")
+        lhs_row_key = check.get("lhs_row_key", "summary")
+        rhs_plus = check.get("rhs_plus_row_keys", []) or []
+        rhs_minus = check.get("rhs_minus_row_keys", []) or []
+        if not col:
+            continue
+
+        if lhs_row_key == "summary":
+            lhs_val = col_value(summary_row, col)
+        else:
+            lhs_val = extra_row_value(lhs_row_key, col)
+            if lhs_val is None:
+                continue
+
+        rhs_plus_vals = []
+        rhs_minus_vals = []
+        missing_rows = []
+        for rk in rhs_plus:
+            v = extra_row_value(rk, col)
+            if v is None:
+                missing_rows.append(rk)
+            else:
+                rhs_plus_vals.append(v)
+        for rk in rhs_minus:
+            v = extra_row_value(rk, col)
+            if v is None:
+                missing_rows.append(rk)
+            else:
+                rhs_minus_vals.append(v)
+
+        if not rhs_plus_vals and not rhs_minus_vals:
+            continue
+
+        rhs_val = round(sum(rhs_plus_vals) - sum(rhs_minus_vals), 2)
+        diff = round(lhs_val - rhs_val, 2)
+        passed = abs(diff) <= tolerance
+
+        detail = ""
+        if not passed:
+            detail = f"lhs={lhs_val:.2f}，rhs={rhs_val:.2f}，差 {diff:+.2f}"
+            if missing_rows:
+                missing_labels = []
+                excel_cfg = CONFIG.get("excel", {})
+                extra_cfg = excel_cfg.get("extra_summary_rows", {})
+                for rk in missing_rows:
+                    missing_labels.append(extra_cfg.get(rk, {}).get("label", rk))
+                detail += f"（{'、'.join(missing_labels)} 未找到）"
+
+        checks.append({
+            "kind": "extra_summary_check",
+            "name": name,
+            "lhs_value": lhs_val,
+            "rhs_value": rhs_val,
+            "diff": diff,
+            "passed": passed,
+            "detail": detail
+        })
+
     passed_count = sum(1 for c in checks if c["passed"])
     failed_count = len(checks) - passed_count
     return {
@@ -926,6 +1090,7 @@ def append_validation_sheet(file_bytes, validation_result,
         "column_sum": "纵向加总",
         "row_formula_summary": "横向公式",
         "row_formula_rows": "横向公式",
+        "extra_summary_check": "额外汇总校验",
     }
 
     # 明细行
@@ -1100,6 +1265,7 @@ def build_summary_workbook(parsed_list, validation_results, tf_columns,
         "row_formula_summary": "横向公式",
         "row_formula_rows": "横向公式",
         "signature_check": "签名栏",
+        "extra_summary_check": "额外汇总校验",
     }
     cur = 4
     for p in parsed_list:

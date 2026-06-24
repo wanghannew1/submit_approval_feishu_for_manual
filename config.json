@@ -1,8 +1,8 @@
 {
   "excel": {
     "title_row": 1,
-    "unit_name_row": 2,
-    "header_start_row": 3,
+    "unit_name_row": 0,
+    "header_start_row": 2,
     "header_row_count": 3,
     "summary_row_marker": "合计",
     "unit_name_patterns": [
@@ -19,19 +19,11 @@
     "columns": {
       "transfer_total": {
         "keywords": ["转账合计", "转款合计"],
-        "label": "转账合计（元）"
+        "label": "转账合计(元)"
       },
       "deduction_total": {
         "keywords": ["扣款合计"],
-        "label": "扣款合计（五险一金、单位代理费）"
-      },
-      "net_gross": {
-        "keywords": ["实发工资"],
-        "label": "实发工资（扣调整前）"
-      },
-      "net_total": {
-        "keywords": ["实发合计"],
-        "label": "实发合计（元）"
+        "label": "扣款合计(五险一金、单位代理费)"
       },
       "personal_tax": {
         "keywords": ["个人所得税", "个税"],
@@ -56,6 +48,24 @@
       "pay_cash": {
         "keywords": ["交纳现金", "缴纳现金"],
         "label": "交纳现金"
+      },
+      "net_total": {
+        "keywords": ["实发工资"],
+        "label": "实发工资(元)"
+      },
+      "tax_and_fee": {
+        "keywords": ["税费"],
+        "label": "税费"
+      }
+    },
+    "extra_summary_rows": {
+      "overpayment_offset": {
+        "keywords": ["溢缴款抵扣"],
+        "label": "溢缴款抵扣"
+      },
+      "party_a_transfer": {
+        "keywords": ["甲方转款"],
+        "label": "甲方转款"
       }
     }
   },
@@ -68,63 +78,75 @@
     "column_sum_checks": [
       {"column": "deduction_total"},
       {"column": "personal_tax"},
-      {"column": "net_gross"},
-      {"column": "net_total"},
       {"column": "adjustment"},
-      {"column": "pay_cash"}
+      {"column": "pay_cash"},
+      {"column": "net_total"},
+      {"column": "tax_and_fee"}
     ],
     "row_formulas": [
       {
-        "name": "转账合计 = 扣款合计 + 个人所得税 + 个人其他调整 + 个人欠款 + 个人承担代理费 + 扣工会会费 - 交纳现金 + 实发合计",
+        "name": "转账合计 = 扣款合计 + 个人所得税 + 个人其他调整 + 个人欠款 + 个人承担代理费 + 扣工会会费 - 交纳现金 + 实发工资",
         "lhs": "transfer_total",
         "rhs_plus": ["deduction_total", "personal_tax", "adjustment", "personal_debt", "personal_proxy_fee", "union_fee", "net_total"],
         "rhs_minus": ["pay_cash"]
       }
     ],
+    "extra_summary_checks": [
+      {
+        "name": "转款合计 = 溢缴款抵扣 + 甲方转款",
+        "column": "transfer_total",
+        "lhs_row_key": "summary",
+        "rhs_plus_row_keys": ["overpayment_offset", "party_a_transfer"],
+        "rhs_minus_row_keys": []
+      }
+    ],
     "required_signatures": [
-      ["总经理签字", "部长签字|部长、分管副总签字", "财务审核", "业务审核"],
-      ["总经理签字", "部长签字|部长、分管副总签字", "财务审核"]
+      ["总经理签字", "财务审核", "业务审核"]
     ]
   },
   "table_field": {
     "columns": [
       {"key": "report_name", "label": "报表名称"},
-      {"key": "unit_name", "label": "甲方单位项目名称"},
-      {"key": "transfer_total", "label": "转账合计（元）"},
-      {"key": "deduction_total", "label": "扣款合计（五险一金、单位代理费）"},
+      {"key": "party_a_transfer", "label": "甲方转款"},
+      {"key": "overpayment_offset", "label": "溢缴款抵扣"},
+      {"key": "transfer_total", "label": "转账合计(元)"},
+      {"key": "tax_and_fee", "label": "税费(元)"},
+      {"key": "deduction_total", "label": "扣款合计(五险一金、单位代理费)"},
       {"key": "personal_tax", "label": "个人所得税"},
-        {"key": "personal_debt", "label": "个人欠款"},
-        {"key": "personal_proxy_fee", "label": "个人承担代理费"},
-        {"key": "union_fee", "label": "扣工会会费"},
-        {"key": "pay_cash", "label": "交纳现金"},
-        {"key": "adjustment", "label": "个人其他调整"},
-        {"key": "net_total", "label": "实发合计（元）"}
+      {"key": "personal_debt", "label": "个人欠款"},
+      {"key": "pay_cash", "label": "交纳现金"},
+      {"key": "personal_proxy_fee", "label": "个人承担代理费"},
+      {"key": "union_fee", "label": "扣工会会费"},
+      {"key": "adjustment", "label": "个人其他调整"},
+      {"key": "net_total", "label": "实发工资(元)"}
     ]
   },
   "ui": {
-    "template_name": "东软系统工资发放表审批",
-    "description": "请上传东软系统导出的工资发放表，上传页面会自动提取全部工资的转账合计、扣款合计、实发合计数值，计算个税及其他数值"
+    "template_name": "工资发放审批(手工做表)",
+    "description": "上传手工编写的工资发放表,自动校验转账合计/扣款合计/个税/实发工资等数值并提交飞书OA审批"
   },
   "feishu_form": {
     "approval_code_env": "FEISHU_APPROVAL_CODE",
     "controls": {
-      "title": {"feishu_type": "input", "control_name_hint": "标题", "feishu_id": "widget17811628753290001"},
-      "attachments": {"feishu_type": "attachmentV2", "control_name_hint": "附件", "feishu_id": "widget16496686388470001"},
-      "table": {"feishu_type": "fieldList", "control_name_hint": "薪酬发放明细", "feishu_id": "widget16496685286700001"},
-      "remark": {"feishu_type": "textarea", "control_name_hint": "备注", "feishu_id": "widget17811635300840001"}
+      "title": {"feishu_type": "input", "control_name_hint": "标题", "feishu_id": ""},
+      "attachments": {"feishu_type": "attachmentV2", "control_name_hint": "附件", "feishu_id": ""},
+      "table": {"feishu_type": "fieldList", "control_name_hint": "薪酬发放明细", "feishu_id": ""},
+      "remark": {"feishu_type": "textarea", "control_name_hint": "备注", "feishu_id": ""}
     },
     "table_sub_controls": {
-      "report_name": {"feishu_type": "input", "feishu_id": "widget17811629865160001"},
-      "unit_name": {"feishu_type": "input", "feishu_id": "widget17811630160530001"},
-      "transfer_total": {"feishu_type": "amount", "feishu_id": "widget16496685800140001"},
-      "deduction_total": {"feishu_type": "amount", "feishu_id": "widget17811632175290001"},
-      "personal_tax": {"feishu_type": "amount", "feishu_id": "widget17811632599910001"},
-      "personal_debt": {"feishu_type": "amount", "feishu_id": "widget17811632838960001"},
-      "pay_cash": {"feishu_type": "amount", "feishu_id": "widget17816837666160001"},
-      "personal_proxy_fee": {"feishu_type": "amount", "feishu_id": "widget17811633075360001"},
-      "union_fee": {"feishu_type": "amount", "feishu_id": "widget17811633663510001"},
-      "adjustment": {"feishu_type": "amount", "feishu_id": "widget17811633849100001"},
-      "net_total": {"feishu_type": "amount", "feishu_id": "widget17811634196160001"}
+      "report_name": {"feishu_type": "input", "feishu_id": ""},
+      "party_a_transfer": {"feishu_type": "amount", "feishu_id": ""},
+      "overpayment_offset": {"feishu_type": "amount", "feishu_id": ""},
+      "transfer_total": {"feishu_type": "amount", "feishu_id": ""},
+      "tax_and_fee": {"feishu_type": "amount", "feishu_id": ""},
+      "deduction_total": {"feishu_type": "amount", "feishu_id": ""},
+      "personal_tax": {"feishu_type": "amount", "feishu_id": ""},
+      "personal_debt": {"feishu_type": "amount", "feishu_id": ""},
+      "pay_cash": {"feishu_type": "amount", "feishu_id": ""},
+      "personal_proxy_fee": {"feishu_type": "amount", "feishu_id": ""},
+      "union_fee": {"feishu_type": "amount", "feishu_id": ""},
+      "adjustment": {"feishu_type": "amount", "feishu_id": ""},
+      "net_total": {"feishu_type": "amount", "feishu_id": ""}
     }
   }
 }
