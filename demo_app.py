@@ -1641,6 +1641,24 @@ def query_feishu_approval_definition():
         print("Error: FEISHU_APP_ID, FEISHU_APP_SECRET, or FEISHU_APPROVAL_CODE not set")
         return None
 
+    # 早返回: 若 config.json 中所有控件 feishu_id 已映射, 跳过 API 调用
+    # (streamlit 每次交互会重跑 main(), 避免重复打飞书接口)
+    config_path = os.path.join(os.path.dirname(__file__), "config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                _cfg = json.load(f)
+            _ff = _cfg.get("feishu_form", {})
+            _ctrls = _ff.get("controls", {})
+            _subs = _ff.get("table_sub_controls", {})
+            _all_mapped = all(v.get("feishu_id") for v in _ctrls.values()) and \
+                          all(v.get("feishu_id") for v in _subs.values())
+            if _all_mapped and _ctrls and _subs:
+                logger.info("All feishu controls already mapped, skipping API query")
+                return None
+        except (json.JSONDecodeError, IOError):
+            pass
+
     client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
 
     request = GetApprovalRequest.builder() \
