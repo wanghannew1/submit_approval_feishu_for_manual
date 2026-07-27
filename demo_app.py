@@ -1535,7 +1535,7 @@ def main():
     col1, col2 = st.columns([1, 1])
     with col2:
         if st.button("退出登录"):
-            for key in ["logged_in", "open_id", "department_id", "user_name"]:
+            for key in ["logged_in", "open_id", "department_id", "user_name", "selected_rule_set"]:
                 st.session_state.pop(key, None)
             st.rerun()
     uploaded_files = st.file_uploader(
@@ -1574,8 +1574,57 @@ def main():
                 f"建议在标题中明确写出年月。"
             )
 
-    # 工资表内容校验
+    # --- 规则集选择 ---
     val_cfg = CONFIG.get("validation", DEFAULT_CONFIG["validation"])
+    rule_sets = val_cfg.get("rule_sets", {}) or {}
+    selected_rule_set = "default"
+
+    if rule_sets and any(rid != "default" for rid in rule_sets):
+        # 自动检测
+        auto_rs = "default"
+        if val_cfg.get("auto_detect", {}).get("enabled", True) and parsed_list:
+            auto_rs = detect_rule_set(parsed_list[0], val_cfg)
+
+        if "selected_rule_set" not in st.session_state:
+            st.session_state.selected_rule_set = auto_rs
+
+        all_ids = ["default"] + [rid for rid in rule_sets if rid != "default"]
+        rs_labels = {"default": "通用规则（默认）"}
+        for rid, rs in rule_sets.items():
+            rs_labels[rid] = rs.get("name", rid)
+
+        current_val = st.session_state.selected_rule_set
+        if current_val not in all_ids:
+            current_val = auto_rs
+        if current_val not in all_ids:
+            current_val = "default"
+
+        st.subheader("验证规则选择")
+        col_a, col_b = st.columns([3, 1])
+        with col_a:
+            selected_rs = st.selectbox(
+                "验证规则",
+                options=all_ids,
+                format_func=lambda k: rs_labels.get(k, k),
+                index=all_ids.index(current_val),
+                key="rule_set_selector",
+            )
+            st.session_state.selected_rule_set = selected_rs
+        with col_b:
+            if auto_rs != "default":
+                if auto_rs != st.session_state.selected_rule_set:
+                    st.info(f"自动检测建议: {rs_labels.get(auto_rs, auto_rs)}")
+                else:
+                    st.success(f"已自动匹配: {rs_labels.get(auto_rs, auto_rs)}")
+
+        if st.session_state.selected_rule_set in rule_sets:
+            rs_info = rule_sets[st.session_state.selected_rule_set]
+            if rs_info.get("description"):
+                st.caption(f"📋 {rs_info['description']}")
+
+        selected_rule_set = st.session_state.selected_rule_set
+
+    # 工资表内容校验
     required_sigs = val_cfg.get("required_signatures", [])
     validation_results = {}  # {filename: validation_result}
     signature_results = {}   # {filename: signature_check_result}
@@ -1599,7 +1648,7 @@ def main():
         excel_cols_def = CONFIG.get("excel", {}).get("columns", {})
         for p in parsed_list:
             try:
-                vr = validate_payroll(p, val_cfg, excel_cols_def)
+                vr = validate_payroll(p, val_cfg, excel_cols_def, rule_set_name=selected_rule_set)
             except ValueError as e:
                 st.error(f"⚠️ {p['filename']} 校验配置错误：{e}")
                 vr = None
@@ -1613,6 +1662,13 @@ def main():
     st.subheader("数据预览")
     preview_data = []
     tf_columns = CONFIG["table_field"]["columns"]
+    # 当前使用的规则集名称（用于预览表显示）
+    rs_labels = {"default": "通用规则（默认）"}
+    if rule_sets:
+        for rid, rs_def in rule_sets.items():
+            rs_labels[rid] = rs_def.get("name", rid)
+    active_rule_name = rs_labels.get(selected_rule_set, selected_rule_set)
+
     for p in parsed_list:
         row = {"文件名": p["filename"], "年月": p["year_month"]}
         for col in tf_columns:
@@ -1637,6 +1693,7 @@ def main():
 
         if sig_parts:
             row["验证结果"] = " | ".join(sig_parts)
+        row["使用规则"] = active_rule_name
         preview_data.append(row)
     st.dataframe(preview_data)
 
