@@ -814,7 +814,7 @@ def get_validation_rules(validation_cfg, rule_set_name=None):
     返回 dict，包含 column_sum_checks / row_formulas / extra_summary_checks。
     """
     if rule_set_name is None or rule_set_name == "default":
-        rule_sets = validation_cfg.get("rule_sets", {})
+        rule_sets = validation_cfg.get("rule_sets", {}) or {}
         if "default" in rule_sets:
             rules = rule_sets["default"]
             return {
@@ -828,7 +828,7 @@ def get_validation_rules(validation_cfg, rule_set_name=None):
             "extra_summary_checks": validation_cfg.get("extra_summary_checks", []),
         }
 
-    rule_sets = validation_cfg.get("rule_sets", {})
+    rule_sets = validation_cfg.get("rule_sets", {}) or {}
     rs = rule_sets.get(rule_set_name)
     if rs is not None:
         return {
@@ -851,7 +851,7 @@ def detect_rule_set(parsed_data, validation_cfg):
     if not auto_detect.get("enabled", True):
         return "default"
 
-    rule_sets = validation_cfg.get("rule_sets", {})
+    rule_sets = validation_cfg.get("rule_sets", {}) or {}
     if not rule_sets:
         return "default"
 
@@ -1662,7 +1662,6 @@ def main():
     st.subheader("数据预览")
     preview_data = []
     tf_columns = CONFIG["table_field"]["columns"]
-    # 当前使用的规则集名称（用于预览表显示）
     rs_labels = {"default": "通用规则（默认）"}
     if rule_sets:
         for rid, rs_def in rule_sets.items():
