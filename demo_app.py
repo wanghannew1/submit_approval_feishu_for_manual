@@ -150,7 +150,42 @@ DEFAULT_CONFIG = {
         ],
         "required_signatures": [
             ["总经理签字", "财务审核", "业务审核"]
-        ]
+        ],
+        "rule_sets": {
+            "default": {
+                "name": "通用规则（默认）",
+                "description": "适用于标准工资表模板的通用验证规则",
+                "column_sum_checks": [
+                    {"column": "deduction_total"},
+                    {"column": "personal_tax"},
+                    {"column": "adjustment"},
+                    {"column": "pay_cash"},
+                    {"column": "net_total"},
+                    {"column": "tax_and_fee"}
+                ],
+                "row_formulas": [
+                    {
+                        "name": "转款合计 = 扣款合计 + 个人所得税 + 个人其他调整 + 个人欠款 + 个人承担代理费 + 扣工会会费 - 交纳现金 + 实发工资",
+                        "lhs": "transfer_total",
+                        "rhs_plus": ["deduction_total", "personal_tax", "adjustment", "personal_debt", "personal_proxy_fee", "union_fee", "net_total"],
+                        "rhs_minus": ["pay_cash"]
+                    }
+                ],
+                "extra_summary_checks": [
+                    {
+                        "name": "转款合计 = 溢缴款抵扣 + 甲方转款",
+                        "column": "transfer_total",
+                        "lhs_row_key": "summary",
+                        "rhs_plus_row_keys": ["overpayment_offset", "party_a_transfer"],
+                        "rhs_minus_row_keys": []
+                    }
+                ]
+            }
+        },
+        "auto_detect": {
+            "enabled": True,
+            "fallback_to_default": True
+        }
     },
     "table_field": {
         "columns": [
@@ -768,18 +803,127 @@ def _row_label(row, default_label):
     return default_label
 
 
-def validate_payroll(parsed, validation_cfg, excel_cols):
+def get_validation_rules(validation_cfg, rule_set_name=None):
+    """
+    根据规则集名称获取验证规则配置。
+
+    如果 rule_set_name 为 None 或 'default'：
+      1) 当 validation_cfg 中有 rule_sets.default 时，返回该规则集配置
+      2) 否则从顶级字段返回（向后兼容）
+    如果指定规则集不存在，回退到 default 规则集或顶级字段并打 warning。
+    返回 dict，包含 column_sum_checks / row_formulas / extra_summary_checks。
+    """
+    if rule_set_name is None or rule_set_name == "default":
+        rule_sets = validation_cfg.get("rule_sets", {})
+        if "default" in rule_sets:
+            rules = rule_sets["default"]
+            return {
+                "column_sum_checks": rules.get("column_sum_checks", validation_cfg.get("column_sum_checks", [])),
+                "row_formulas": rules.get("row_formulas", validation_cfg.get("row_formulas", [])),
+                "extra_summary_checks": rules.get("extra_summary_checks", validation_cfg.get("extra_summary_checks", [])),
+            }
+        return {
+            "column_sum_checks": validation_cfg.get("column_sum_checks", []),
+            "row_formulas": validation_cfg.get("row_formulas", []),
+            "extra_summary_checks": validation_cfg.get("extra_summary_checks", []),
+        }
+
+    rule_sets = validation_cfg.get("rule_sets", {})
+    rs = rule_sets.get(rule_set_name)
+    if rs is not None:
+        return {
+            "column_sum_checks": rs.get("column_sum_checks", []),
+            "row_formulas": rs.get("row_formulas", []),
+            "extra_summary_checks": rs.get("extra_summary_checks", []),
+        }
+
+    logger.warning("Rule set '%s' not found, falling back to default config", rule_set_name)
+    return get_validation_rules(validation_cfg, "default")
+
+
+def detect_rule_set(parsed_data, validation_cfg):
+    """
+    根据解析后的数据自动匹配最合适的验证规则集。
+    基于标题关键词、单位名称关键词和表头列关键词进行评分匹配。
+    返回规则集名称字符串（如 "default"、"template_a" 等）。
+    """
+    auto_detect = validation_cfg.get("auto_detect", {})
+    if not auto_detect.get("enabled", True):
+        return "default"
+
+    rule_sets = validation_cfg.get("rule_sets", {})
+    if not rule_sets:
+        return "default"
+
+    report_name = (parsed_data.get("report_name", "") or "").lower()
+    unit_name = (parsed_data.get("unit_name", "") or "").lower()
+    col_indices = parsed_data.get("column_indices", {})
+
+    scores = {}
+    for rs_id, rs_def in rule_sets.items():
+        score = 0
+        detect = rs_def.get("detect", {})
+        for kw in detect.get("title_keywords", []):
+            if kw.lower() in report_name:
+                score += 1
+        for kw in detect.get("unit_keywords", []):
+            if kw.lower() in unit_name:
+                score += 1
+        for kw in detect.get("header_keywords", []):
+            if any(kw.lower() in col_key.lower() for col_key in col_indices.keys()):
+                score += 1
+        scores[rs_id] = score
+
+    if not scores or max(scores.values()) == 0:
+        return "default"
+    return max(scores, key=scores.get)
+
+
+def get_rule_set_options(validation_cfg):
+    """返回 [(id, display_name), ...] 列表用于 Streamlit selectbox。"""
+    options = [("default", "通用规则（默认）")]
+    rule_sets = validation_cfg.get("rule_sets", {}) or {}
+    for rs_id, rs in rule_sets.items():
+        options.append((rs_id, rs.get("name", rs_id)))
+    return options
+
+
+def format_rule_set_info(validation_cfg, rs_id):
+    """返回规则集的描述 Markdown 字符串，用于 UI 展示。"""
+    rule_sets = validation_cfg.get("rule_sets", {}) or {}
+    rs = rule_sets.get(rs_id)
+    if rs and rs.get("description"):
+        return rs["description"]
+    return ""
+
+
+def get_available_rule_sets(validation_cfg):
+    """返回所有可用规则集的列表，每项含 id / name / description。"""
+    result = [{"id": "default", "name": "通用规则（默认）", "description": ""}]
+    rule_sets = validation_cfg.get("rule_sets", {}) or {}
+    for rs_id, rs in rule_sets.items():
+        result.append({
+            "id": rs_id,
+            "name": rs.get("name", rs_id),
+            "description": rs.get("description", ""),
+        })
+    return result
+
+
+def validate_payroll(parsed, validation_cfg, excel_cols, rule_set_name=None):
     """
     校验解析后的工资表数据，返回结构化结果。
     parsed: parse_excel 的返回值（必须含 column_indices/summary_row/data_rows）
     validation_cfg: CONFIG['validation']
     excel_cols: CONFIG['excel']['columns']
+    rule_set_name: 可选，用于选择验证规则集
 
     校验类型：
       column_sum:           sum(数据列) == 合计行该列
       row_formula_summary:  合计行 lhs == sum(rhs_plus) - sum(rhs_minus)
       row_formula_rows:     每个数据行同公式
     """
+    rules = get_validation_rules(validation_cfg, rule_set_name)
     tolerance = float(validation_cfg.get("tolerance", 0.0))
     column_indices = parsed.get("column_indices", {})
     summary_row = parsed.get("summary_row")
@@ -810,7 +954,7 @@ def validate_payroll(parsed, validation_cfg, excel_cols):
             pass
 
     # === A. 纵向列加总 ===
-    for spec in validation_cfg.get("column_sum_checks", []) or []:
+    for spec in rules.get("column_sum_checks", []) or []:
         col_key = spec.get("column")
         if not col_key:
             continue
@@ -832,7 +976,7 @@ def validate_payroll(parsed, validation_cfg, excel_cols):
         })
 
     # === B+C. 横向公式 ===
-    for formula in validation_cfg.get("row_formulas", []) or []:
+    for formula in rules.get("row_formulas", []) or []:
         name = formula.get("name", "<未命名公式>")
         lhs = formula.get("lhs")
         rhs_plus = formula.get("rhs_plus", []) or []
@@ -913,7 +1057,7 @@ def validate_payroll(parsed, validation_cfg, excel_cols):
         except (ValueError, TypeError):
             return 0.0
 
-    for check in validation_cfg.get("extra_summary_checks", []) or []:
+    for check in rules.get("extra_summary_checks", []) or []:
         name = check.get("name", "<未命名校验>")
         col = check.get("column")
         lhs_row_key = check.get("lhs_row_key", "summary")
