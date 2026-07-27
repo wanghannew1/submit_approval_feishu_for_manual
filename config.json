@@ -172,7 +172,42 @@
         "财务审核",
         "业务审核"
       ]
-    ]
+    ],
+    "rule_sets": {
+      "default": {
+        "name": "通用规则（默认）",
+        "description": "适用于标准工资表模板的通用验证规则",
+        "column_sum_checks": [
+          {"column": "deduction_total"},
+          {"column": "personal_tax"},
+          {"column": "adjustment"},
+          {"column": "pay_cash"},
+          {"column": "net_total"},
+          {"column": "tax_and_fee"}
+        ],
+        "row_formulas": [
+          {
+            "name": "转款合计 = 扣款合计 + 个人所得税 + 个人其他调整 + 个人欠款 + 个人承担代理费 + 扣工会会费 - 交纳现金 + 实发工资",
+            "lhs": "transfer_total",
+            "rhs_plus": ["deduction_total", "personal_tax", "adjustment", "personal_debt", "personal_proxy_fee", "union_fee", "net_total"],
+            "rhs_minus": ["pay_cash"]
+          }
+        ],
+        "extra_summary_checks": [
+          {
+            "name": "转款合计 = 溢缴款抵扣 + 甲方转款",
+            "column": "transfer_total",
+            "lhs_row_key": "summary",
+            "rhs_plus_row_keys": ["overpayment_offset", "party_a_transfer"],
+            "rhs_minus_row_keys": []
+          }
+        ]
+      }
+    },
+    "auto_detect": {
+      "enabled": true,
+      "fallback_to_default": true
+    }
   },
   "table_field": {
     "columns": [
