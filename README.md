@@ -135,7 +135,7 @@ streamlit run demo_app.py
 ### 1. 横向公式（每行 + 合计行）
 
 ```
-转账合计 = 扣款合计 + 个人所得税 + 个人其他调整 + 个人欠款 + 个人承担代理费 + 扣工会会费 - 交纳现金 + 实发工资
+转款合计 = 扣款合计 + 个人所得税 + 个人其他调整 + 个人欠款 + 个人承担代理费 + 扣工会会费 - 交纳现金 + 实发工资 + 税费
 ```
 
 ### 2. 额外汇总校验
@@ -144,7 +144,7 @@ streamlit run demo_app.py
 转款合计 = 溢缴款抵扣 + 甲方转款
 ```
 
-**缺列处理**：如果某张工资表中缺少某些列（如扣款合计、个人所得税等），该列按 **0** 参与计算，公式仍然保持结构有效。
+**缺列处理**：如果某张工资表中缺少某些列（如扣款合计、个人所得税等），该列按 **0** 参与计算，公式仍然保持结构有效。例如司法局外包员工模板没有「个人所得税」列、但有「税费」列：个人所得税按 0 计、税费按实际值参与，「转款合计 = 扣款合计 + 实发工资 + 税费」的勾稽关系依然成立。
 
 ---
 
@@ -260,9 +260,9 @@ server {
     ],
     "row_formulas": [
       {
-        "name": "转账合计 = 扣款合计 + 个人所得税 + 个人其他调整 + 个人欠款 + 个人承担代理费 + 扣工会会费 - 交纳现金 + 实发工资",
+        "name": "转款合计 = 扣款合计 + 个人所得税 + 个人其他调整 + 个人欠款 + 个人承担代理费 + 扣工会会费 - 交纳现金 + 实发工资 + 税费",
         "lhs": "transfer_total",
-        "rhs_plus": ["deduction_total", "personal_tax", "adjustment", "personal_debt", "personal_proxy_fee", "union_fee", "net_total"],
+        "rhs_plus": ["deduction_total", "personal_tax", "adjustment", "personal_debt", "personal_proxy_fee", "union_fee", "net_total", "tax_and_fee"],
         "rhs_minus": ["pay_cash"]
       }
     ],
@@ -325,6 +325,69 @@ server {
 ```
 
 > **注意**：`feishu_form` 中的 `feishu_id` 默认为空字符串。首次启动时，若已配置 `FEISHU_APPROVAL_CODE`，程序会自动调用飞书 API 查询审批模板并尝试按标签匹配填充控件 ID。若自动匹配失败，需手动在飞书审批模板设计器中复制控件 ID 填入 `config.json`。
+
+### 配置字段说明
+
+`config.json` 共五个顶层字段：`excel`（解析规则）、`validation`（校验规则）、`table_field`（飞书表格字段）、`ui`（界面）、`feishu_form`（飞书控件映射）。
+
+#### `excel` — 工资表解析规则
+
+| 字段 | 含义 |
+|------|------|
+| `title_row` | 报表标题所在行（1 起，默认 1）。标题取该行第一个非空单元格，用作「报表名称」，并从中提取单位名与年月 |
+| `unit_name_row` | 独立单位名称行（1 起）。`0` 表示没有独立行，改为从标题行提取单位名（默认 0，面向手工做表） |
+| `header_start_row` | 表头起始行（1 起，默认 2） |
+| `header_row_count` | 表头占用的行数，支持多级合并表头（默认 3，如「本月扣款 → 养老/失业/工伤/医疗 → 个人%/单位%」三级表头） |
+| `summary_row_marker` | 合计行的首列标记（忽略所有空格，默认「合计」，故「合计」「合 计」都能识别） |
+| `columns` | 列定义。键是程序内部使用的**列 ID**（`transfer_total`、`deduction_total`、`tax_and_fee` 等，也是校验公式引用的名字）；`keywords` 为表头匹配关键词（子串匹配，按数组顺序优先）；`label` 为界面显示名。**表中缺失的列在公式中按 0 参与计算** |
+| `extra_summary_rows` | 合计行之后的额外汇总行（默认「溢缴款抵扣」「甲方转款」）。按首列关键词识别，数值按与主表相同的列位置提取 |
+| `unit_name_patterns` | 从独立单位名称行提取单位名的正则（取 group 1） |
+| `title_unit_patterns` | 从标题行提取单位名的正则（取 group 1，优先于后缀算法） |
+| `title_unit_suffixes` / `title_unit_allowed_chars` | 无正则时，用「后缀枚举 + 向左贪婪扩展 + 取最长」从标题提取单位名的配置 |
+
+#### `validation` — 数值校验规则
+
+| 字段 | 含义 |
+|------|------|
+| `enabled` | 是否启用数值校验 |
+| `strict` | 严格模式：校验未全部通过时**禁止提交**审批 |
+| `tolerance` | 允许误差（元，默认 0.00）。浮点尾差场景可设 0.01 |
+| `write_back_sheet` / `write_back_sheet_name` | 是否在原表末尾回写校验结果 sheet 及其名称（默认「验证结果」；.xls 只读不支持回写，会改为在汇总表里看明细） |
+| `column_sum_checks` | **纵向加总**校验：对每个 `column`，求数据区各行该列之和，与合计行该列比较。只验证"行加总 = 合计行"，不验证列间关系 |
+| `row_formulas` | **横向公式**校验：每条公式 `lhs` 列 = Σ`rhs_plus` 列 − Σ`rhs_minus` 列，**合计行与每个数据行分别校验**。缺列按 0 |
+| `extra_summary_checks` | **额外汇总行**校验：`lhs_row_key` 为 `summary` 时取合计行，否则取额外汇总行（如 `party_a_transfer`）；`rhs_plus_row_keys` / `rhs_minus_row_keys` 为加/减项行，缺行不参与并提示 |
+| `required_signatures` | 签名关键词检查（**读取顶层这份**）。扁平数组 `["A","B"]` 要求全部存在；分组数组 `[["A","B"],["C"]]` 时**任一组**全部命中即通过 |
+| `rule_sets` | 规则集容器：每个规则集是一整套校验配置（`name`/`description`/`detect` + `column_sum_checks` + `row_formulas` + `extra_summary_checks`），用于适配不同模板 |
+| `auto_detect` | 规则集自动匹配开关：`enabled=true` 且存在非 default 规则集时，按 `detect` 关键词对第一个附件打分选规则集；全部不命中回退 `default`（`fallback_to_default`） |
+
+**顶层字段 vs `rule_sets` 的关系**：顶层 `column_sum_checks` / `row_formulas` / `extra_summary_checks` 是旧版扁平配置，作为兜底；**只要 `rule_sets.default` 存在，程序优先使用它**（`get_validation_rules` 逻辑）。修改默认规则时，两处应保持一致，防止 default 规则集被删后行为跳变。
+
+**规则集 `detect` 自动匹配**（`detect_rule_set`）：每个规则集可配三个关键词组，命中一个 +1 分，得分最高者胜出，平分为 0 时回退 default：
+
+| 关键词组 | 匹配对象 | 示例 |
+|----------|----------|------|
+| `title_keywords` | 报表标题（小写子串匹配） | `"外包员工"` → 命中「长春市司法局 2026年外包员工7月工资明细表」 |
+| `unit_keywords` | 提取出的单位名（小写子串匹配） | `"司法局"` |
+| `header_keywords` | **列的英文键名**（`column_indices` 的 key，不是中文表头！） | `"tax_and_fee"` |
+
+#### `table_field.columns` — 飞书审批表格字段
+
+13 个字段按顺序展示：`report_name`、`party_a_transfer`、`overpayment_offset`、`transfer_total`、`tax_and_fee`、`deduction_total`、`personal_tax`、`personal_debt`、`pay_cash`、`personal_proxy_fee`、`union_fee`、`adjustment`、`net_total`。`key` 对应解析/校验使用的列 ID，`label` 是飞书表格里的列名。
+
+#### `ui` — 界面显示
+
+| 字段 | 含义 |
+|------|------|
+| `template_name` | 页面标题（Streamlit `st.title` 显示用，**不是**审批标题；审批标题由 `generate_title()` 按「单位 + 年月 + 工资发放请示」格式生成） |
+| `description` | 页面展示的项目描述 |
+
+#### `feishu_form` — 飞书审批控件映射
+
+| 字段 | 含义 |
+|------|------|
+| `approval_code_env` | 审批流程编码所取的环境变量名（默认 `FEISHU_APPROVAL_CODE`） |
+| `controls` | 主表单控件：标题 / 附件 / 薪酬发放明细表 / 备注 |
+| `table_sub_controls` | 明细表格内 13 列控件。`feishu_id` 留空时首次启动自动拉取审批模板控件 ID 按标签匹配填入；匹配失败需手动填写 |
 
 ---
 
