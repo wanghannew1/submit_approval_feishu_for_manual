@@ -93,6 +93,54 @@
           "税费"
         ],
         "label": "税费"
+      },
+      "cost_total": {
+        "keywords": [
+          "成本合计"
+        ],
+        "label": "成本合计"
+      },
+      "gross_total": {
+        "keywords": [
+          "应发合计"
+        ],
+        "label": "应发合计"
+      },
+      "unit_social_total": {
+        "keywords": [
+          "单位缴纳五险一金"
+        ],
+        "label": "单位缴纳五险一金"
+      },
+      "base_salary": {
+        "keywords": [
+          "基本工资"
+        ],
+        "label": "基本工资"
+      },
+      "overtime_pay": {
+        "keywords": [
+          "加班费"
+        ],
+        "label": "加班费"
+      },
+      "post_subsidy": {
+        "keywords": [
+          "岗位补贴"
+        ],
+        "label": "岗位补贴"
+      },
+      "meal_subsidy": {
+        "keywords": [
+          "补助"
+        ],
+        "label": "补助"
+      },
+      "travel_allowance": {
+        "keywords": [
+          "差旅费"
+        ],
+        "label": "差旅费（免税）"
       }
     },
     "extra_summary_rows": {
@@ -107,6 +155,28 @@
           "甲方转款"
         ],
         "label": "甲方转款"
+      },
+      "management_fee": {
+        "keywords": [
+          "管理费"
+        ],
+        "label": "管理费",
+        "value_mode": "row_label_value"
+      },
+      "tax_fee": {
+        "keywords": [
+          "税费"
+        ],
+        "label": "税费（6%）",
+        "value_mode": "row_label_value"
+      },
+      "outsourcing_transfer_total": {
+        "keywords": [
+          "外包费用转款合计",
+          "转款合计"
+        ],
+        "label": "外包费用转款合计",
+        "value_mode": "row_label_value"
       }
     }
   },
@@ -201,6 +271,74 @@
             "lhs_row_key": "summary",
             "rhs_plus_row_keys": ["overpayment_offset", "party_a_transfer"],
             "rhs_minus_row_keys": []
+          }
+        ]
+      },
+      "jilin_outsourcing": {
+        "name": "外包业务规则（外包人员工资发放表）",
+        "description": "适用于合计行下方带管理费/税费/外包费用转款合计的外包人员工资发放表（如吉林农商行）",
+        "detect": {
+          "title_keywords": ["外包人员工资发放表"],
+          "unit_keywords": [],
+          "header_keywords": ["cost_total", "gross_total"]
+        },
+        "column_sum_checks": [
+          {"column": "cost_total"},
+          {"column": "gross_total"},
+          {"column": "unit_social_total"},
+          {"column": "deduction_total"},
+          {"column": "personal_tax"},
+          {"column": "net_total"}
+        ],
+        "row_formulas": [
+          {
+            "name": "成本合计 = 扣款合计 + 个人所得税 + 实发工资 + 个人欠款 + 个人承担代理费 + 扣工会会费 + 个人其他调整 - 交纳现金",
+            "lhs": "cost_total",
+            "rhs_plus": ["deduction_total", "personal_tax", "net_total", "personal_debt", "personal_proxy_fee", "union_fee", "adjustment"],
+            "rhs_minus": ["pay_cash"]
+          },
+          {
+            "name": "应发合计 = 基本工资 + 加班费 + 岗位补贴 + 补助 + 差旅费",
+            "lhs": "gross_total",
+            "rhs_plus": ["base_salary", "overtime_pay", "post_subsidy", "meal_subsidy", "travel_allowance"],
+            "rhs_minus": []
+          },
+          {
+            "name": "成本合计 = 应发合计 + 单位缴纳五险一金",
+            "lhs": "cost_total",
+            "rhs_plus": ["gross_total", "unit_social_total"],
+            "rhs_minus": []
+          }
+        ],
+        "cross_row_formulas": [
+          {
+            "name": "外包费用转款合计 = 成本合计 + 管理费 + 税费",
+            "lhs": {"row_key": "outsourcing_transfer_total", "source": "row_value"},
+            "rhs_plus": [
+              {"row_key": "summary", "source": "column", "column": "cost_total"},
+              {"row_key": "management_fee", "source": "row_value"},
+              {"row_key": "tax_fee", "source": "row_value"}
+            ],
+            "rhs_minus": []
+          }
+        ],
+        "percent_checks": [
+          {
+            "name": "管理费 = 成本合计 × 3.5%",
+            "target": {"row_key": "management_fee", "source": "row_value"},
+            "base": [{"row_key": "summary", "source": "column", "column": "cost_total"}],
+            "rate": 0.035,
+            "tolerance": 0.01
+          },
+          {
+            "name": "税费 = (成本合计 + 管理费) × 6%",
+            "target": {"row_key": "tax_fee", "source": "row_value"},
+            "base": [
+              {"row_key": "summary", "source": "column", "column": "cost_total"},
+              {"row_key": "management_fee", "source": "row_value"}
+            ],
+            "rate": 0.06,
+            "tolerance": 0.01
           }
         ]
       }
@@ -346,6 +484,196 @@
       "net_total": {
         "feishu_type": "amount",
         "feishu_id": "widget17811634196160001"
+      }
+    }
+  },
+  "flows": {
+    "manual": {
+      "name": "手工工资单审批",
+      "rule_set": "default",
+      "approval_code_env": "FEISHU_APPROVAL_CODE",
+      "detect": {"header_keywords": ["transfer_total"]},
+      "feishu_form": {
+        "approval_code_env": "FEISHU_APPROVAL_CODE",
+        "controls": {
+          "title": {
+            "feishu_type": "input",
+            "control_name_hint": "标题",
+            "feishu_id": "widget17811628753290001"
+          },
+          "attachments": {
+            "feishu_type": "attachmentV2",
+            "control_name_hint": "附件",
+            "feishu_id": "widget16496686388470001"
+          },
+          "table": {
+            "feishu_type": "fieldList",
+            "control_name_hint": "薪酬发放明细",
+            "feishu_id": "widget16496685286700001"
+          },
+          "remark": {
+            "feishu_type": "textarea",
+            "control_name_hint": "备注",
+            "feishu_id": "widget17811635300840001"
+          }
+        },
+        "table_sub_controls": {
+          "report_name": {
+            "feishu_type": "input",
+            "feishu_id": "widget17811629865160001"
+          },
+          "party_a_transfer": {
+            "feishu_type": "amount",
+            "feishu_id": "widget17822958110070001"
+          },
+          "overpayment_offset": {
+            "feishu_type": "amount",
+            "feishu_id": "widget17822960394550001"
+          },
+          "transfer_total": {
+            "feishu_type": "amount",
+            "feishu_id": "widget16496685800140001"
+          },
+          "tax_and_fee": {
+            "feishu_type": "amount",
+            "feishu_id": "widget17822963272840001"
+          },
+          "deduction_total": {
+            "feishu_type": "amount",
+            "feishu_id": "widget17811632175290001"
+          },
+          "personal_tax": {
+            "feishu_type": "amount",
+            "feishu_id": "widget17811632599910001"
+          },
+          "personal_debt": {
+            "feishu_type": "amount",
+            "feishu_id": "widget17811632838960001"
+          },
+          "pay_cash": {
+            "feishu_type": "amount",
+            "feishu_id": "widget17816837666160001"
+          },
+          "personal_proxy_fee": {
+            "feishu_type": "amount",
+            "feishu_id": "widget17811633075360001"
+          },
+          "union_fee": {
+            "feishu_type": "amount",
+            "feishu_id": "widget17811633663510001"
+          },
+          "adjustment": {
+            "feishu_type": "amount",
+            "feishu_id": "widget17811633849100001"
+          },
+          "net_total": {
+            "feishu_type": "amount",
+            "feishu_id": "widget17811634196160001"
+          }
+        }
+      },
+      "table_field": {
+        "columns": [
+          {
+            "key": "report_name",
+            "label": "报表名称"
+          },
+          {
+            "key": "party_a_transfer",
+            "label": "甲方转款"
+          },
+          {
+            "key": "overpayment_offset",
+            "label": "溢缴款抵扣"
+          },
+          {
+            "key": "transfer_total",
+            "label": "转款合计"
+          },
+          {
+            "key": "tax_and_fee",
+            "label": "税费"
+          },
+          {
+            "key": "deduction_total",
+            "label": "扣款合计"
+          },
+          {
+            "key": "personal_tax",
+            "label": "个人所得税"
+          },
+          {
+            "key": "personal_debt",
+            "label": "个人欠款"
+          },
+          {
+            "key": "pay_cash",
+            "label": "交纳现金"
+          },
+          {
+            "key": "personal_proxy_fee",
+            "label": "个人承担代理费"
+          },
+          {
+            "key": "union_fee",
+            "label": "扣工会会费"
+          },
+          {
+            "key": "adjustment",
+            "label": "个人其他调整"
+          },
+          {
+            "key": "net_total",
+            "label": "实发工资"
+          }
+        ]
+      }
+    },
+    "outsourcing": {
+      "name": "外包业务手工工资单审批",
+      "rule_set": "jilin_outsourcing",
+      "approval_code_env": "FEISHU_APPROVAL_CODE_OUTSOURCING",
+      "detect": {"extra_row_keywords": ["outsourcing_transfer_total"], "title_keywords": ["外包人员工资发放表"]},
+      "feishu_form": {
+        "approval_code_env": "FEISHU_APPROVAL_CODE_OUTSOURCING",
+        "controls": {
+          "title": {"feishu_type": "input", "control_name_hint": "标题", "feishu_id": "widget17811628753290001"},
+          "attachments": {"feishu_type": "attachmentV2", "control_name_hint": "附件", "feishu_id": "widget16496686388470001"},
+          "table": {"feishu_type": "fieldList", "control_name_hint": "薪酬发放明细", "feishu_id": "widget16496685286700001"},
+          "remark": {"feishu_type": "textarea", "control_name_hint": "备注", "feishu_id": "widget17811635300840001"}
+        },
+        "table_sub_controls": {
+          "report_name": {"feishu_type": "input", "feishu_id": "widget17811629865160001"},
+          "outsourcing_transfer_total": {"feishu_type": "amount", "feishu_id": "widget17822958110070001"},
+          "management_fee": {"feishu_type": "amount", "feishu_id": "widget17822960394550001"},
+          "tax_fee": {"feishu_type": "amount", "feishu_id": "widget17920351523310001"},
+          "cost_total": {"feishu_type": "amount", "feishu_id": "widget16496685800140001"},
+          "deduction_total": {"feishu_type": "amount", "feishu_id": "widget17811632175290001"},
+          "personal_tax": {"feishu_type": "amount", "feishu_id": "widget17811632599910001"},
+          "personal_debt": {"feishu_type": "amount", "feishu_id": "widget17811632838960001"},
+          "pay_cash": {"feishu_type": "amount", "feishu_id": "widget17816837666160001"},
+          "personal_proxy_fee": {"feishu_type": "amount", "feishu_id": "widget17811633075360001"},
+          "union_fee": {"feishu_type": "amount", "feishu_id": "widget17811633663510001"},
+          "adjustment": {"feishu_type": "amount", "feishu_id": "widget17811633849100001"},
+          "net_total": {"feishu_type": "amount", "feishu_id": "widget17811634196160001"}
+        }
+      },
+      "table_field": {
+        "columns": [
+          {"key": "report_name", "label": "报表名称"},
+          {"key": "outsourcing_transfer_total", "label": "外包费用转款合计"},
+          {"key": "management_fee", "label": "管理费"},
+          {"key": "tax_fee", "label": "税费"},
+          {"key": "cost_total", "label": "成本合计"},
+          {"key": "deduction_total", "label": "扣款合计"},
+          {"key": "personal_tax", "label": "个人所得税"},
+          {"key": "personal_debt", "label": "个人欠款"},
+          {"key": "pay_cash", "label": "交纳现金"},
+          {"key": "personal_proxy_fee", "label": "个人承担代理费"},
+          {"key": "union_fee", "label": "扣工会会费"},
+          {"key": "adjustment", "label": "个人其他调整"},
+          {"key": "net_total", "label": "实发工资"}
+        ]
       }
     }
   }

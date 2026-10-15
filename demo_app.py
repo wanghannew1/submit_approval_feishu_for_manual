@@ -315,7 +315,7 @@ class FeishuClient:
             return None
         return payload["data"]["code"]  # file_code (UUID)
 
-    def build_feishu_form(self, parsed_list, title, file_codes, remark=""):
+    def build_feishu_form(self, parsed_list, title, file_codes, remark="", flow_id="manual"):
         """
         构建飞书审批表单 JSON 字符串
 
@@ -323,11 +323,18 @@ class FeishuClient:
         title: 审批标题字符串
         file_codes: 上传文件返回的 file_code 列表（UUID 字符串列表）
         remark: 备注字符串
+        flow_id: 审批流 ID（"manual" 或 "outsourcing" 等）
 
         返回: JSON 序列化后的字符串（飞书 API 要求 form 是字符串而非数组对象）
         """
         config = load_config()
-        feishu_form = config.get("feishu_form", {})
+        flows = config.get("flows", {})
+        
+        if flow_id in flows:
+            feishu_form = flows[flow_id].get("feishu_form", {})
+        else:
+            feishu_form = config.get("feishu_form", {})
+        
         controls_cfg = feishu_form.get("controls", {})
         table_sub_cfg = feishu_form.get("table_sub_controls", {})
 
@@ -616,6 +623,10 @@ def parse_excel(file_bytes, filename):
         fallback.setdefault("extra_summary_values", {})
         fallback.setdefault("party_a_transfer", "0.00")
         fallback.setdefault("overpayment_offset", "0.00")
+        # 外包模板的额外汇总行顶层 key 兜底
+        fallback.setdefault("management_fee", "0.00")
+        fallback.setdefault("tax_fee", "0.00")
+        fallback.setdefault("outsourcing_transfer_total", "0.00")
         return fallback
 
     # Header rows from config (1-based start, N rows)
@@ -714,20 +725,33 @@ def parse_excel(file_bytes, filename):
                 for kw in keywords:
                     kw_normalized = re.sub(r"\s+", "", kw)
                     if kw_normalized in first_cell:
-                        row_values = {}
-                        for col_key, cidx in column_indices.items():
-                            if cidx >= 0 and cidx < len(row):
-                                v = row[cidx]
-                                if v is None:
-                                    row_values[col_key] = "0.00"
-                                else:
+                        value_mode = row_def.get("value_mode")
+                        if value_mode == "row_label_value":
+                            # 取 row[1:] 中第一个非 None 单元格作为该行的金额值
+                            row_value_str = "0.00"
+                            for cell in row[1:]:
+                                if cell is not None:
                                     try:
-                                        row_values[col_key] = f"{float(v):.2f}"
+                                        row_value_str = f"{float(cell):.2f}"
                                     except (ValueError, TypeError):
-                                        row_values[col_key] = str(v).strip() or "0.00"
-                            else:
-                                row_values[col_key] = "0.00"
-                        extra_summary_values[row_key] = row_values
+                                        row_value_str = str(cell).strip() or "0.00"
+                                    break
+                            extra_summary_values[row_key] = {"row_value": row_value_str}
+                        else:
+                            row_values = {}
+                            for col_key, cidx in column_indices.items():
+                                if cidx >= 0 and cidx < len(row):
+                                    v = row[cidx]
+                                    if v is None:
+                                        row_values[col_key] = "0.00"
+                                    else:
+                                        try:
+                                            row_values[col_key] = f"{float(v):.2f}"
+                                        except (ValueError, TypeError):
+                                            row_values[col_key] = str(v).strip() or "0.00"
+                                else:
+                                    row_values[col_key] = "0.00"
+                            extra_summary_values[row_key] = row_values
                         break
 
     result = {
@@ -747,7 +771,14 @@ def parse_excel(file_bytes, filename):
     result.update(column_summary_values)
     # 把额外汇总行的 transfer_total 值展平到顶层，方便 table_field 引用
     for row_key, row_values in extra_summary_values.items():
-        result[row_key] = row_values.get("transfer_total", "0.00")
+        if "row_value" in row_values:
+            result[row_key] = row_values["row_value"]
+        else:
+            result[row_key] = row_values.get("transfer_total", "0.00")
+
+    result.setdefault("management_fee", "0.00")
+    result.setdefault("tax_fee", "0.00")
+    result.setdefault("outsourcing_transfer_total", "0.00")
 
     # 智能填充缺失的额外汇总行：
     #   转款合计 = 溢缴款抵扣 + 甲方转款
@@ -811,7 +842,8 @@ def get_validation_rules(validation_cfg, rule_set_name=None):
       1) 当 validation_cfg 中有 rule_sets.default 时，返回该规则集配置
       2) 否则从顶级字段返回（向后兼容）
     如果指定规则集不存在，回退到 default 规则集或顶级字段并打 warning。
-    返回 dict，包含 column_sum_checks / row_formulas / extra_summary_checks。
+    返回 dict，包含 column_sum_checks / row_formulas / extra_summary_checks
+    / cross_row_formulas / percent_checks。
     """
     if rule_set_name is None or rule_set_name == "default":
         rule_sets = validation_cfg.get("rule_sets", {}) or {}
@@ -821,11 +853,15 @@ def get_validation_rules(validation_cfg, rule_set_name=None):
                 "column_sum_checks": rules.get("column_sum_checks", validation_cfg.get("column_sum_checks", [])),
                 "row_formulas": rules.get("row_formulas", validation_cfg.get("row_formulas", [])),
                 "extra_summary_checks": rules.get("extra_summary_checks", validation_cfg.get("extra_summary_checks", [])),
+                "cross_row_formulas": rules.get("cross_row_formulas", validation_cfg.get("cross_row_formulas", [])),
+                "percent_checks": rules.get("percent_checks", validation_cfg.get("percent_checks", [])),
             }
         return {
             "column_sum_checks": validation_cfg.get("column_sum_checks", []),
             "row_formulas": validation_cfg.get("row_formulas", []),
             "extra_summary_checks": validation_cfg.get("extra_summary_checks", []),
+            "cross_row_formulas": validation_cfg.get("cross_row_formulas", []),
+            "percent_checks": validation_cfg.get("percent_checks", []),
         }
 
     rule_sets = validation_cfg.get("rule_sets", {}) or {}
@@ -835,6 +871,8 @@ def get_validation_rules(validation_cfg, rule_set_name=None):
             "column_sum_checks": rs.get("column_sum_checks", []),
             "row_formulas": rs.get("row_formulas", []),
             "extra_summary_checks": rs.get("extra_summary_checks", []),
+            "cross_row_formulas": rs.get("cross_row_formulas", []),
+            "percent_checks": rs.get("percent_checks", []),
         }
 
     logger.warning("Rule set '%s' not found, falling back to default config", rule_set_name)
@@ -877,6 +915,76 @@ def detect_rule_set(parsed_data, validation_cfg):
     if not scores or max(scores.values()) == 0:
         return "default"
     return max(scores, key=scores.get)
+
+
+def detect_batch_flow(parsed_list, flows_cfg):
+    """
+    检测一批文件属于哪个审批流。
+
+    返回 (flow_id, error_message):
+    - 全部文件匹配同一 flow → (flow_id, None)
+    - 混合批次 → (None, "检测到不同模板族混传...")
+    - 无匹配 → ("manual", None) 向后兼容
+    - flows_cfg 为空 → ("manual", None)
+    """
+    if not flows_cfg:
+        return ("manual", None)
+    
+    if not parsed_list:
+        return ("manual", None)
+    
+    flow_counts = {}
+    
+    for parsed in parsed_list:
+        if not parsed:
+            continue
+        
+        report_name = (parsed.get("report_name", "") or "").lower()
+        col_indices = parsed.get("column_indices", {})
+        extra_summary_values = parsed.get("extra_summary_values", {})
+        
+        scores = {}
+        for flow_id, flow_def in flows_cfg.items():
+            score = 0
+            detect = flow_def.get("detect", {})
+            
+            for kw in detect.get("title_keywords", []):
+                if kw.lower() in report_name:
+                    score += 1
+            
+            for key in detect.get("header_keywords", []):
+                if col_indices.get(key, -1) >= 0:
+                    score += 1
+            
+            for key in detect.get("extra_row_keywords", []):
+                if key in extra_summary_values or key in parsed:
+                    score += 1
+            
+            if score > 0:
+                scores[flow_id] = score
+        
+        if not scores:
+            matched_flow = "manual"
+        else:
+            max_score = max(scores.values())
+            candidates = [fid for fid, s in scores.items() if s == max_score]
+            if len(candidates) > 1 and "manual" in candidates:
+                matched_flow = "manual"
+            else:
+                matched_flow = candidates[0]
+        
+        flow_counts[matched_flow] = flow_counts.get(matched_flow, 0) + 1
+    
+    if len(flow_counts) == 0:
+        return ("manual", None)
+    
+    if len(flow_counts) == 1:
+        flow_id = list(flow_counts.keys())[0]
+        return (flow_id, None)
+    
+    counts_str = " / ".join(f"{flows_cfg.get(fid, {}).get('name', fid)} {cnt} 张" for fid, cnt in flow_counts.items())
+    error_msg = f"检测到不同模板族混传（{counts_str}），请分两次提交"
+    return (None, error_msg)
 
 
 def get_rule_set_options(validation_cfg):
@@ -1115,6 +1223,66 @@ def validate_payroll(parsed, validation_cfg, excel_cols, rule_set_name=None):
             "diff": diff,
             "passed": passed,
             "detail": detail
+        })
+
+    def _resolve_ref(ref):
+        """Resolve a cross-row/percent ref to float. Missing → 0.00."""
+        rk = ref.get("row_key", "")
+        src = ref.get("source", "")
+        if rk == "summary" and src == "column":
+            return col_value(summary_row, ref.get("column", ""))
+        if src == "row_value":
+            rd = extra_summary_values.get(rk, {})
+            rv = rd.get("row_value", "0.00")
+            try:
+                return round(float(rv), 2)
+            except (ValueError, TypeError):
+                return 0.0
+        return 0.0
+
+    for formula in rules.get("cross_row_formulas", []) or []:
+        name = formula.get("name", "<未命名跨行公式>")
+        lhs_ref = formula.get("lhs", {})
+        rhs_plus_refs = formula.get("rhs_plus", []) or []
+        rhs_minus_refs = formula.get("rhs_minus", []) or []
+        lhs_val = _resolve_ref(lhs_ref)
+        rhs_val = round(
+            sum(_resolve_ref(r) for r in rhs_plus_refs)
+            - sum(_resolve_ref(r) for r in rhs_minus_refs),
+            2,
+        )
+        diff = round(lhs_val - rhs_val, 2)
+        passed = abs(diff) <= tolerance
+        checks.append({
+            "kind": "cross_row_formula",
+            "name": name,
+            "lhs_value": lhs_val,
+            "rhs_value": rhs_val,
+            "diff": diff,
+            "passed": passed,
+            "detail": "" if passed else f"lhs={lhs_val:.2f}，rhs={rhs_val:.2f}，差 {diff:+.2f}",
+        })
+
+    for pc in rules.get("percent_checks", []) or []:
+        name = pc.get("name", "<未命名百分比校验>")
+        target_ref = pc.get("target", {})
+        base_refs = pc.get("base", []) or []
+        rate = float(pc.get("rate", 0.0))
+        pc_tolerance = float(pc.get("tolerance", 0.01))
+        target_val = _resolve_ref(target_ref)
+        base_sum = sum(_resolve_ref(r) for r in base_refs)
+        expected = round(base_sum * rate, 2)
+        diff = round(target_val - expected, 2)
+        passed = abs(diff) <= pc_tolerance
+        checks.append({
+            "kind": "percent_check",
+            "name": name,
+            "target_value": target_val,
+            "expected_value": expected,
+            "rate": rate,
+            "diff": diff,
+            "passed": passed,
+            "detail": "" if passed else f"target={target_val:.2f}，expected={expected:.2f}，差 {diff:+.2f}",
         })
 
     passed_count = sum(1 for c in checks if c["passed"])
@@ -1500,7 +1668,8 @@ def main():
         st.session_state.user_name = ""
 
     client = FeishuClient()
-    query_feishu_approval_definition()
+    for _flow_id in (list(CONFIG.get("flows", {})) or ["manual"]):
+        query_feishu_approval_definition(_flow_id)
 
     # Section 1: Phone Login
     if not st.session_state.logged_in:
@@ -1558,6 +1727,47 @@ def main():
     if not parsed_list:
         st.error("未能解析任何文件，请检查格式")
         return
+
+    flows_cfg = CONFIG.get("flows", {})
+    detected_flow, flow_error = detect_batch_flow(parsed_list, flows_cfg)
+    
+    if "selected_flow" not in st.session_state:
+        st.session_state.selected_flow = detected_flow if detected_flow else "manual"
+    
+    if flow_error:
+        st.error(flow_error)
+        st.session_state.flow_error = flow_error
+    else:
+        st.session_state.flow_error = None
+    
+    if flows_cfg:
+        flow_options = list(flows_cfg.keys())
+        flow_labels = {fid: flows_cfg[fid].get("name", fid) for fid in flow_options}
+        
+        current_flow = st.session_state.selected_flow
+        if current_flow not in flow_options:
+            current_flow = "manual" if "manual" in flow_options else flow_options[0]
+        
+        st.subheader("审批流选择")
+        selected_flow = st.selectbox(
+            "审批流",
+            options=flow_options,
+            format_func=lambda k: flow_labels.get(k, k),
+            index=flow_options.index(current_flow),
+            key="flow_selector",
+        )
+        st.session_state.selected_flow = selected_flow
+        
+        if detected_flow and detected_flow == selected_flow:
+            st.success(f"检测到模板族：{flow_labels.get(detected_flow, detected_flow)}（自动）")
+        elif detected_flow and detected_flow != selected_flow:
+            st.info(f"已手动切换至：{flow_labels.get(selected_flow, selected_flow)}（自动检测为：{flow_labels.get(detected_flow, detected_flow)}）")
+        
+        if selected_flow in flows_cfg:
+            flow_rule_set = flows_cfg[selected_flow].get("rule_set", "default")
+            if "selected_rule_set" not in st.session_state or st.session_state.get("last_flow") != selected_flow:
+                st.session_state.selected_rule_set = flow_rule_set
+            st.session_state.last_flow = selected_flow
 
     # 标题 vs 文件名年月一致性检查（取标题为准；不一致时提醒制表人核对）
     for p in parsed_list:
@@ -1661,7 +1871,14 @@ def main():
     # Preview table
     st.subheader("数据预览")
     preview_data = []
-    tf_columns = CONFIG["table_field"]["columns"]
+    
+    selected_flow = st.session_state.get("selected_flow", "manual")
+    flows_cfg = CONFIG.get("flows", {})
+    if selected_flow in flows_cfg:
+        tf_columns = flows_cfg[selected_flow].get("table_field", {}).get("columns", [])
+    else:
+        tf_columns = CONFIG.get("table_field", {}).get("columns", [])
+    
     rs_labels = {"default": "通用规则（默认）"}
     if rule_sets:
         for rid, rs_def in rule_sets.items():
@@ -1750,7 +1967,8 @@ def main():
     st.text_input("审批标题（自动生成）", value=title, disabled=True)
 
     # Submit button
-    final_blocked = submit_blocked or signature_check_blocked
+    flow_error = st.session_state.get("flow_error")
+    final_blocked = submit_blocked or signature_check_blocked or bool(flow_error)
     if submit_blocked:
         st.error("⚠️ 校验未通过且当前为严格模式，请修改 Excel 后重新上传")
     if st.button("提交审批", disabled=final_blocked):
@@ -1809,12 +2027,25 @@ def main():
                 progress_bar.progress(done_steps / total_steps)
 
             status_text.text("正在创建审批实例...")
-            form_json = client.build_feishu_form(parsed_list, title, file_codes, remark="")
+            selected_flow = st.session_state.get("selected_flow", "manual")
+            form_json = client.build_feishu_form(parsed_list, title, file_codes, remark="", flow_id=selected_flow)
+            
+            flows = CONFIG.get("flows", {})
+            if selected_flow in flows:
+                approval_code_env = flows[selected_flow].get("approval_code_env", "FEISHU_APPROVAL_CODE")
+            else:
+                approval_code_env = "FEISHU_APPROVAL_CODE"
+            
+            approval_code = os.getenv(approval_code_env)
+            if not approval_code:
+                st.error(f"环境变量 {approval_code_env} 未配置，无法提交审批")
+                return
+            
             instance_code = client.create_approval_instance(
                 open_id=open_id,
                 department_id=department_id,
                 form_json=form_json,
-                approval_code=os.getenv("FEISHU_APPROVAL_CODE"),
+                approval_code=approval_code,
             )
             progress_bar.progress(1.0)
             status_text.empty()
@@ -1829,26 +2060,42 @@ def main():
             st.error(f"提交失败：{e}")
 
 
-def query_feishu_approval_definition():
+def query_feishu_approval_definition(flow_id="manual"):
     import lark_oapi as lark
     from lark_oapi.api.approval.v4 import GetApprovalRequest
 
     app_id = os.getenv("FEISHU_APP_ID")
     app_secret = os.getenv("FEISHU_APP_SECRET")
-    approval_code = os.getenv("FEISHU_APPROVAL_CODE")
-
-    if not app_id or not app_secret or not approval_code:
-        print("Error: FEISHU_APP_ID, FEISHU_APP_SECRET, or FEISHU_APPROVAL_CODE not set")
-        return None
-
-    # 早返回: 若 config.json 中所有控件 feishu_id 已映射, 跳过 API 调用
-    # (streamlit 每次交互会重跑 main(), 避免重复打飞书接口)
+    
     config_path = os.path.join(os.path.dirname(__file__), "config.json")
+    approval_code_env = "FEISHU_APPROVAL_CODE"
     if os.path.exists(config_path):
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 _cfg = json.load(f)
-            _ff = _cfg.get("feishu_form", {})
+            flows = _cfg.get("flows", {})
+            if flow_id in flows:
+                approval_code_env = flows[flow_id].get("approval_code_env", "FEISHU_APPROVAL_CODE")
+        except (json.JSONDecodeError, IOError):
+            pass
+    
+    approval_code = os.getenv(approval_code_env)
+
+    if not app_id or not app_secret or not approval_code:
+        print(f"Error: FEISHU_APP_ID, FEISHU_APP_SECRET, or {approval_code_env} not set")
+        return None
+
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                _cfg = json.load(f)
+            
+            flows = _cfg.get("flows", {})
+            if flow_id in flows:
+                _ff = flows[flow_id].get("feishu_form", {})
+            else:
+                _ff = _cfg.get("feishu_form", {})
+            
             _ctrls = _ff.get("controls", {})
             _subs = _ff.get("table_sub_controls", {})
             _all_mapped = all(v.get("feishu_id") for v in _ctrls.values()) and \
@@ -1883,7 +2130,7 @@ def query_feishu_approval_definition():
         print(f"Error parsing form JSON: {e}")
         return None
 
-    _map_feishu_controls_to_config(controls)
+    _map_feishu_controls_to_config(controls, flow_id=flow_id)
 
     return [
         {"id": c.get("id"), "type": c.get("type"), "name": c.get("name")}
@@ -1891,7 +2138,7 @@ def query_feishu_approval_definition():
     ]
 
 
-def _map_feishu_controls_to_config(controls):
+def _map_feishu_controls_to_config(controls, flow_id="manual"):
     config_path = os.path.join(os.path.dirname(__file__), "config.json")
     if not os.path.exists(config_path):
         print("Warning: config.json not found, skipping mapping")
@@ -1900,7 +2147,12 @@ def _map_feishu_controls_to_config(controls):
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    feishu_form = config.get("feishu_form", {})
+    flows = config.get("flows", {})
+    if flow_id in flows:
+        feishu_form = flows[flow_id].get("feishu_form", {})
+    else:
+        feishu_form = config.get("feishu_form", {})
+    
     cfg_controls = feishu_form.get("controls", {})
     cfg_table_sub = feishu_form.get("table_sub_controls", {})
 
@@ -1988,6 +2240,17 @@ def _map_feishu_controls_to_config(controls):
         print("Unmatched controls:")
         for key, hint in unmatched:
             print(f"  - {key}: {hint}")
+
+    if flow_id == "manual":
+        top_feishu_form = config.setdefault("feishu_form", {})
+        top_controls = top_feishu_form.setdefault("controls", {})
+        top_table_sub = top_feishu_form.setdefault("table_sub_controls", {})
+        for key, cfg in cfg_controls.items():
+            if cfg.get("feishu_id"):
+                top_controls.setdefault(key, {})["feishu_id"] = cfg["feishu_id"]
+        for key, cfg in cfg_table_sub.items():
+            if cfg.get("feishu_id"):
+                top_table_sub.setdefault(key, {})["feishu_id"] = cfg["feishu_id"]
 
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
