@@ -22,6 +22,7 @@ from requests_toolbelt import MultipartEncoder
 # ── Logging Setup ───────────────────────────────────────────────
 LOG_DIR = Path(__file__).parent / "log"
 LOG_DIR.mkdir(exist_ok=True)
+TEMPLATE_PATH = Path(__file__).parent / "templates" / "外包人员工资发放表模板.xlsx"
 
 logger = logging.getLogger("submit_approval_feishu")
 logger.setLevel(logging.DEBUG)
@@ -1710,6 +1711,15 @@ def main():
     uploaded_files = st.file_uploader(
         "上传工资表", type=["xlsx", "xls"], accept_multiple_files=True
     )
+
+    if TEMPLATE_PATH.exists():
+        st.download_button(
+            label="📥 下载外包工资表模板",
+            data=TEMPLATE_PATH.read_bytes(),
+            file_name="外包人员工资发放表模板.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        st.caption("📄 首次使用可先下载模板，参照格式填写后再上传")
 
     if not uploaded_files:
         st.info("请上传一个或多个 Excel 工资表文件")

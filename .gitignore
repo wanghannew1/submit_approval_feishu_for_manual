@@ -4,6 +4,9 @@
 # Internal planning
 .omo/
 
+# CodeGraph index
+.codegraph/
+
 # Python
 __pycache__/
 *.pyc
