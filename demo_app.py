@@ -497,23 +497,36 @@ def _extract_year_month(text, current_year=None):
     return ""
 
 
-def parse_excel(file_bytes, filename):
+def parse_excel(file_bytes, filename, sheet_name=None):
     """
     Extract payroll data from Excel bytes.
     Returns dict with report_name, unit_name, year_month,
     transfer_total, deduction_total, net_total, tax_and_others.
+
+    sheet_name: 多 sheet 拆分场景下从原文件按名解析指定 sheet（取缓存值）；
+    缺省解析活动 sheet。
     """
-    # 根据扩展名选择解析库：.xlsx → openpyxl, .xls → xlrd
-    filename_lower = filename.lower()
-    if filename_lower.endswith('.xls') and not filename_lower.endswith('.xlsx'):
+    # 按内容嗅探格式：PK 开头是 .xlsx 系（zip），否则按 .xls（OLE2）处理。
+    # 拆分场景下 filename 可能已是 .xlsx，但传入字节是原 .xls，
+    # 所以不能只看文件名扩展。
+    if file_bytes[:2] == b"PK":
+        wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+        if sheet_name and sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+        else:
+            ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+    else:
         import xlrd
         wb = xlrd.open_workbook(file_contents=file_bytes)
-        ws = wb.sheet_by_index(0)
+        if sheet_name:
+            try:
+                ws = wb.sheet_by_name(sheet_name)
+            except Exception:
+                ws = wb.sheet_by_index(0)
+        else:
+            ws = wb.sheet_by_index(0)
         rows = [ws.row_values(r) for r in range(ws.nrows)]
-    else:
-        wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
-        ws = wb.active
-        rows = list(ws.iter_rows(values_only=True))
     if not rows:
         return None
 
@@ -833,20 +846,75 @@ def parse_excel(file_bytes, filename):
     return result
 
 
+_XLSX_CONVERT_CACHE: dict = {}  # md5(.xls字节) → LibreOffice 转换后的 .xlsx 字节
+
+
+def _convert_xls_to_xlsx(file_bytes):
+    """LibreOffice 无头模式把 .xls 整本转换为 .xlsx（保留格式），按内容缓存。
+
+    Streamlit 每次控件交互都会重跑 main()，缓存避免重复转换。失败返回 None。
+    """
+    import hashlib
+    import subprocess
+    import tempfile
+
+    key = hashlib.md5(file_bytes).hexdigest()
+    if key in _XLSX_CONVERT_CACHE:
+        return _XLSX_CONVERT_CACHE[key]
+    with tempfile.NamedTemporaryFile(suffix=".xls", delete=False) as tmp_in:
+        tmp_in.write(file_bytes)
+        tmp_in_path = tmp_in.name
+    out_dir = tempfile.mkdtemp()
+    converted = None
+    try:
+        result = subprocess.run(
+            ["libreoffice", "--headless", "--convert-to", "xlsx",
+             "--outdir", out_dir, tmp_in_path],
+            capture_output=True, timeout=120,
+        )
+        if result.returncode == 0:
+            out_path = os.path.join(
+                out_dir,
+                os.path.splitext(os.path.basename(tmp_in_path))[0] + ".xlsx",
+            )
+            with open(out_path, "rb") as f:
+                converted = f.read()
+            _XLSX_CONVERT_CACHE[key] = converted
+        else:
+            logger.warning(
+                "LibreOffice convert failed (code=%d): %s",
+                result.returncode,
+                result.stderr.decode("utf-8", errors="replace"),
+            )
+    except Exception as e:
+        logger.warning("LibreOffice convert error: %s", e)
+    finally:
+        os.unlink(tmp_in_path)
+        import shutil
+        shutil.rmtree(out_dir, ignore_errors=True)
+    return converted
+
+
 def split_workbook_sheets(file_bytes, filename):
     """
     多 sheet 工作簿拆分成单 sheet 文件列表，每个 sheet 一个独立 Excel。
 
-    - .xlsx：逐 sheet 复制单元格值（data_only 取缓存值），生成新工作簿
-    - .xls：xlrd 读取后逐 sheet 重建为 .xlsx（.xls 格式无法写入）
-    - 只有 1 个有效 sheet 时原样返回（不重写，保留原文件字节）
-    - 跳过隐藏 sheet 和全空 sheet
+    拆分机制（保格式）：加载整本原 workbook（保留公式与全部样式），删除其余
+    sheet 后保存 —— 合并单元格、隐藏列/行、列宽、边框、冻结窗格等原样保留，
+    不会逐格重建导致格式丢失。
+    - .xlsx：openpyxl 直接提取
+    - .xls：先 LibreOffice 整本转为 .xlsx（按内容缓存）再提取；
+      LibreOffice 不可用时退回 xlrd 值重建（无格式，仅保证可用）
+    - 只有 1 个有效工资表 sheet 时原样返回（不重写，保留原文件字节）
+    - 跳过隐藏 sheet 和全空 sheet；只拆首列含合计行标记的工资表 sheet
     - 可通过 config excel.split_multi_sheet=false 关闭拆分
 
-    返回: [{"filename": ..., "file_bytes": ...}, ...]，顺序与原工作簿一致
+    返回: [{"filename", "file_bytes", "sheet_name"}, ...]，顺序与原工作簿一致。
+    sheet_name 供 parse_excel 从原文件按名取缓存值；单 sheet 透传时为 None。
     """
+    passthrough = [{"filename": filename, "file_bytes": file_bytes, "sheet_name": None}]
     if not CONFIG.get("excel", {}).get("split_multi_sheet", True):
-        return [{"filename": filename, "file_bytes": file_bytes}]
+        return passthrough
 
     name_lower = filename.lower()
     is_xls = name_lower.endswith(".xls") and not name_lower.endswith(".xlsx")
@@ -872,21 +940,31 @@ def split_workbook_sheets(file_bytes, filename):
         cleaned = re.sub(r'[\\/:*?"<>|\s]+', "_", str(sheet_title)).strip("_")
         return cleaned or "sheet"
 
-    def _build_one(sheet_title, cell_iter):
-        """把 (row, col, value) 迭代器写成单 sheet .xlsx，返回字节流。"""
-        out_wb = openpyxl.Workbook()
-        out_ws = out_wb.active
-        out_ws.title = str(sheet_title)[:31]
-        for r, c, v in cell_iter:
-            out_ws.cell(row=r, column=c, value=v)
+    def _keep_one_sheet(wb_bytes, sname, sidx=0):
+        """加载整本 workbook（保留公式与样式），只保留指定 sheet，返回字节流。"""
+        wb = openpyxl.load_workbook(BytesIO(wb_bytes))
+        keep = None
+        if sname:
+            for ws in wb.worksheets:
+                if ws.title == sname:
+                    keep = ws
+                    break
+        if keep is None:
+            idx = sidx if sidx < len(wb.worksheets) else 0
+            keep = wb.worksheets[idx]
+        for ws in list(wb.worksheets):
+            if ws is not keep:
+                wb.remove(ws)
+        wb.active = 0
         buf = BytesIO()
-        out_wb.save(buf)
+        wb.save(buf)
         return buf.getvalue()
 
+    # —— 目标 sheet 检测（可见、非空、像工资表）——
+    targets = []  # [(sheet_name, sheet_index)]
     if is_xls:
         import xlrd
         wb = xlrd.open_workbook(file_contents=file_bytes)
-        sheets = []
         for si in range(wb.nsheets):
             sh = wb.sheet_by_index(si)
             if sh.nrows == 0 or sh.ncols == 0:
@@ -897,65 +975,73 @@ def split_workbook_sheets(file_bytes, filename):
                 for c in range(sh.ncols)
             ):
                 continue
-            sheets.append(sh)
-        payroll = [sh for sh in sheets if _is_payroll_sheet(sh.col_values(0))]
-        if len(payroll) <= 1:
-            # 只有一个（或零个）像工资表的 sheet → 整体不拆分，保持原文件
-            return [{"filename": filename, "file_bytes": file_bytes}]
-        sheets = payroll
-        items = []
-        for sh in sheets:
-            def _cells(sh=sh):
-                for r in range(sh.nrows):
-                    for c in range(sh.ncols):
-                        v = sh.cell_value(r, c)
-                        if v is None or v == "":
-                            continue
-                        # 日期型单元格转 datetime，避免写进 .xlsx 后变成数字序列
-                        if sh.cell_type(r, c) == xlrd.XL_CELL_DATE:
-                            try:
-                                v = xlrd.xldate_as_datetime(v, wb.datemode)
-                            except Exception:
-                                pass
-                        yield r + 1, c + 1, v
-            data = _build_one(sh.name, _cells())
+            if _is_payroll_sheet(sh.col_values(0)):
+                targets.append((sh.name, si))
+    else:
+        wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+        for si, ws in enumerate(wb.worksheets):
+            if ws.sheet_state != "visible":
+                continue
+            if not any(
+                cell.value is not None and str(cell.value).strip()
+                for row in ws.iter_rows()
+                for cell in row
+            ):
+                continue
+            if _is_payroll_sheet(row[0] for row in ws.iter_rows(values_only=True)):
+                targets.append((ws.title, si))
+
+    if len(targets) <= 1:
+        # 只有一个（或零个）像工资表的 sheet → 整体不拆分，保持原文件
+        return passthrough
+
+    items = []
+    if is_xls:
+        # LibreOffice 整本转 .xlsx（保格式），再逐 sheet 提取
+        converted = _convert_xls_to_xlsx(file_bytes)
+        if converted:
+            for sname, sidx in targets:
+                items.append({
+                    "filename": f"{stem}_{_safe_name(sname)}.xlsx",
+                    "file_bytes": _keep_one_sheet(converted, sname, sidx),
+                    "sheet_name": sname,
+                })
+            return items
+        # 兜底：LibreOffice 不可用 → xlrd 值重建（无格式，仅保证可用）
+        logger.info("LibreOffice unavailable, falling back to value-only .xls split")
+        import xlrd
+        wb = xlrd.open_workbook(file_contents=file_bytes)
+        for sname, sidx in targets:
+            sh = wb.sheet_by_index(sidx)
+            out_wb = openpyxl.Workbook()
+            out_ws = out_wb.active
+            out_ws.title = str(sh.name)[:31]
+            for r in range(sh.nrows):
+                for c in range(sh.ncols):
+                    v = sh.cell_value(r, c)
+                    if v is None or v == "":
+                        continue
+                    # 日期型单元格转 datetime，避免写进 .xlsx 后变成数字序列
+                    if sh.cell_type(r, c) == xlrd.XL_CELL_DATE:
+                        try:
+                            v = xlrd.xldate_as_datetime(v, wb.datemode)
+                        except Exception:
+                            pass
+                    out_ws.cell(row=r + 1, column=c + 1, value=v)
+            buf = BytesIO()
+            out_wb.save(buf)
             items.append({
                 "filename": f"{stem}_{_safe_name(sh.name)}.xlsx",
-                "file_bytes": data,
+                "file_bytes": buf.getvalue(),
+                "sheet_name": sh.name,
             })
         return items
 
-    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
-    sheets = []
-    for ws in wb.worksheets:
-        if ws.sheet_state != "visible":
-            continue
-        if not any(
-            cell.value is not None and str(cell.value).strip()
-            for row in ws.iter_rows()
-            for cell in row
-        ):
-            continue
-        sheets.append(ws)
-    payroll = [
-        ws for ws in sheets
-        if _is_payroll_sheet(row[0] for row in ws.iter_rows(values_only=True))
-    ]
-    if len(payroll) <= 1:
-        # 只有一个（或零个）像工资表的 sheet → 整体不拆分，保持原文件
-        return [{"filename": filename, "file_bytes": file_bytes}]
-    sheets = payroll
-    items = []
-    for ws in sheets:
-        def _cells(ws=ws):
-            for row in ws.iter_rows():
-                for cell in row:
-                    if cell.value is not None:
-                        yield cell.row, cell.column, cell.value
-        data = _build_one(ws.title, _cells())
+    for sname, sidx in targets:
         items.append({
-            "filename": f"{stem}_{_safe_name(ws.title)}.xlsx",
-            "file_bytes": data,
+            "filename": f"{stem}_{_safe_name(sname)}.xlsx",
+            "file_bytes": _keep_one_sheet(file_bytes, sname, sidx),
+            "sheet_name": sname,
         })
     return items
 
@@ -2004,7 +2090,9 @@ def main():
             )
         upload_items.extend(items)
         for item in items:
-            parsed = parse_excel(item["file_bytes"], item["filename"])
+            # 拆分场景：从原文件按 sheet 名解析（取公式缓存值），
+            # 拆分出的保格式文件只作附件上传
+            parsed = parse_excel(file_bytes, item["filename"], sheet_name=item["sheet_name"])
             if parsed:
                 parsed_list.append({"filename": item["filename"], **parsed})
 
