@@ -728,15 +728,20 @@ def parse_excel(file_bytes, filename):
                     if kw_normalized in first_cell:
                         value_mode = row_def.get("value_mode")
                         if value_mode == "row_label_value":
-                            # 取 row[1:] 中第一个非 None 单元格作为该行的金额值
+                            # 取 row[1:] 中第一个非空单元格作为该行的金额值
+                            # 注意：.xls 经 xlrd 解析时空白单元格是 '' 而非 None，
+                            # 必须一并跳过，否则会取到空串并返回 0.00
                             row_value_str = "0.00"
                             for cell in row[1:]:
-                                if cell is not None:
-                                    try:
-                                        row_value_str = f"{float(cell):.2f}"
-                                    except (ValueError, TypeError):
-                                        row_value_str = str(cell).strip() or "0.00"
-                                    break
+                                if cell is None:
+                                    continue
+                                if isinstance(cell, str) and not cell.strip():
+                                    continue
+                                try:
+                                    row_value_str = f"{float(cell):.2f}"
+                                except (ValueError, TypeError):
+                                    row_value_str = str(cell).strip() or "0.00"
+                                break
                             extra_summary_values[row_key] = {"row_value": row_value_str}
                         else:
                             row_values = {}
