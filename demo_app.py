@@ -366,7 +366,7 @@ class FeishuClient:
                     feishu_id = sub_cfg.get("feishu_id")
                     if not feishu_id:
                         continue
-                    val = item.get(key, "")
+                    val = report_value(item, key)
                     feishu_type = sub_cfg.get("feishu_type", "input")
                     if feishu_type in ("number", "amount"):
                         val = str(float(val)) if val != "" else "0"
@@ -487,6 +487,13 @@ def _extract_year_month(text, current_year=None):
             out = normalize(year_match.group(1), mo_match.group(1))
             if out:
                 return out
+
+    # 规则 4：点分格式 YYYY.M / YYYY.MM（如文件名 "2026.10工资表"）
+    m = re.search(r"(?<!\d)(\d{4})[.．](\d{1,2})(?!\d)", text)
+    if m:
+        out = normalize(m.group(1), m.group(2))
+        if out:
+            return out
     return ""
 
 
@@ -628,38 +635,52 @@ def parse_excel(file_bytes, filename):
         fallback.setdefault("management_fee", "0.00")
         fallback.setdefault("tax_fee", "0.00")
         fallback.setdefault("outsourcing_transfer_total", "0.00")
+        fallback.setdefault("ambiguity_errors", [])
         return fallback
 
     # Header rows from config (1-based start, N rows)
     header_rows = rows[header_start_idx : header_start_idx + header_row_count]
 
-    def find_col_index(keywords, exact_first=True):
-        """Find column index matching keywords in header rows."""
-        # Try exact match first
-        for ridx, hrow in enumerate(header_rows):
+    def find_col_matches(kw):
+        """表头中包含 kw 的所有 (列索引, 表头文字)，按行列顺序。"""
+        hits = []
+        for hrow in header_rows:
             for cidx, cell in enumerate(hrow):
                 if cell is None:
                     continue
                 text = str(cell).strip()
                 if not text:
                     continue
-                for kw in keywords:
-                    if kw in text:
-                        return cidx
-        return -1
+                if kw in text:
+                    hits.append((cidx, text))
+        return hits
 
     excel_cols = excel_cfg["columns"]
 
     # 通用化：把 excel.columns 里定义的每一列都找出索引，存到 column_indices
-    # 同时按 keywords 顺序匹配（早出现的优先），跟原来 net_total 的逻辑一致
+    # 按关键词顺序匹配（早出现的优先）。
+    # 歧义保险：若某关键词命中多个表头列（如「实发工资1」「实发工资」都包含
+    # 「实发工资」），无法可靠取数 → 记入 ambiguity_errors，该列索引置 -1，
+    # 由上层报错阻断提交并提示用户修改表头，绝不静默猜列。
     column_indices = {}
+    ambiguity_errors = []
     for col_key, col_def in excel_cols.items():
         keywords = col_def.get("keywords", [])
         idx = -1
         for kw in keywords:
-            idx = find_col_index([kw])
-            if idx != -1:
-                break
+            hits = find_col_matches(kw)
+            if not hits:
+                continue
+            if len(hits) > 1:
+                ambiguity_errors.append({
+                    "column_key": col_key,
+                    "label": col_def.get("label", col_key),
+                    "keyword": kw,
+                    "matches": [t for _, t in hits],
+                })
+                break  # 该列已歧义，不再尝试后续关键词
+            idx = hits[0][0]
+            break
         column_indices[col_key] = idx
 
     transfer_idx = column_indices.get("transfer_total", -1)
@@ -771,6 +792,7 @@ def parse_excel(file_bytes, filename):
         "summary_row": summary_row,
         "data_rows": data_rows,
         "extra_summary_values": extra_summary_values,
+        "ambiguity_errors": ambiguity_errors,
     }
     # 把 excel.columns 里所有列的合计值都加上（包括 transfer/deduction/net）
     # 这样 table_field 可以引用任意已配置的列
@@ -811,6 +833,151 @@ def parse_excel(file_bytes, filename):
     return result
 
 
+def split_workbook_sheets(file_bytes, filename):
+    """
+    多 sheet 工作簿拆分成单 sheet 文件列表，每个 sheet 一个独立 Excel。
+
+    - .xlsx：逐 sheet 复制单元格值（data_only 取缓存值），生成新工作簿
+    - .xls：xlrd 读取后逐 sheet 重建为 .xlsx（.xls 格式无法写入）
+    - 只有 1 个有效 sheet 时原样返回（不重写，保留原文件字节）
+    - 跳过隐藏 sheet 和全空 sheet
+    - 可通过 config excel.split_multi_sheet=false 关闭拆分
+
+    返回: [{"filename": ..., "file_bytes": ...}, ...]，顺序与原工作簿一致
+    """
+    if not CONFIG.get("excel", {}).get("split_multi_sheet", True):
+        return [{"filename": filename, "file_bytes": file_bytes}]
+
+    name_lower = filename.lower()
+    is_xls = name_lower.endswith(".xls") and not name_lower.endswith(".xlsx")
+    stem = re.sub(r"\.(xlsx|xls)$", "", filename, flags=re.IGNORECASE) or filename
+
+    # 工资表特征：首列出现配置的合计行标记（与 parse_excel 同样的归一化规则）。
+    # 多 sheet 拆分时只拆「像工资表」的 sheet，避免把说明页/汇总页当数据表拆出去。
+    excel_cfg = CONFIG.get("excel", DEFAULT_CONFIG["excel"])
+    marker = re.sub(
+        r"\s+", "",
+        str(excel_cfg.get("summary_row_marker", DEFAULT_CONFIG["excel"]["summary_row_marker"])),
+    )
+
+    def _is_payroll_sheet(first_col_values):
+        for v in first_col_values:
+            if v is None:
+                continue
+            if re.sub(r"\s+", "", str(v)) == marker:
+                return True
+        return False
+
+    def _safe_name(sheet_title):
+        cleaned = re.sub(r'[\\/:*?"<>|\s]+', "_", str(sheet_title)).strip("_")
+        return cleaned or "sheet"
+
+    def _build_one(sheet_title, cell_iter):
+        """把 (row, col, value) 迭代器写成单 sheet .xlsx，返回字节流。"""
+        out_wb = openpyxl.Workbook()
+        out_ws = out_wb.active
+        out_ws.title = str(sheet_title)[:31]
+        for r, c, v in cell_iter:
+            out_ws.cell(row=r, column=c, value=v)
+        buf = BytesIO()
+        out_wb.save(buf)
+        return buf.getvalue()
+
+    if is_xls:
+        import xlrd
+        wb = xlrd.open_workbook(file_contents=file_bytes)
+        sheets = []
+        for si in range(wb.nsheets):
+            sh = wb.sheet_by_index(si)
+            if sh.nrows == 0 or sh.ncols == 0:
+                continue
+            if not any(
+                str(sh.cell_value(r, c)).strip()
+                for r in range(sh.nrows)
+                for c in range(sh.ncols)
+            ):
+                continue
+            sheets.append(sh)
+        payroll = [sh for sh in sheets if _is_payroll_sheet(sh.col_values(0))]
+        if len(payroll) <= 1:
+            # 只有一个（或零个）像工资表的 sheet → 整体不拆分，保持原文件
+            return [{"filename": filename, "file_bytes": file_bytes}]
+        sheets = payroll
+        items = []
+        for sh in sheets:
+            def _cells(sh=sh):
+                for r in range(sh.nrows):
+                    for c in range(sh.ncols):
+                        v = sh.cell_value(r, c)
+                        if v is None or v == "":
+                            continue
+                        # 日期型单元格转 datetime，避免写进 .xlsx 后变成数字序列
+                        if sh.cell_type(r, c) == xlrd.XL_CELL_DATE:
+                            try:
+                                v = xlrd.xldate_as_datetime(v, wb.datemode)
+                            except Exception:
+                                pass
+                        yield r + 1, c + 1, v
+            data = _build_one(sh.name, _cells())
+            items.append({
+                "filename": f"{stem}_{_safe_name(sh.name)}.xlsx",
+                "file_bytes": data,
+            })
+        return items
+
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+    sheets = []
+    for ws in wb.worksheets:
+        if ws.sheet_state != "visible":
+            continue
+        if not any(
+            cell.value is not None and str(cell.value).strip()
+            for row in ws.iter_rows()
+            for cell in row
+        ):
+            continue
+        sheets.append(ws)
+    payroll = [
+        ws for ws in sheets
+        if _is_payroll_sheet(row[0] for row in ws.iter_rows(values_only=True))
+    ]
+    if len(payroll) <= 1:
+        # 只有一个（或零个）像工资表的 sheet → 整体不拆分，保持原文件
+        return [{"filename": filename, "file_bytes": file_bytes}]
+    sheets = payroll
+    items = []
+    for ws in sheets:
+        def _cells(ws=ws):
+            for row in ws.iter_rows():
+                for cell in row:
+                    if cell.value is not None:
+                        yield cell.row, cell.column, cell.value
+        data = _build_one(ws.title, _cells())
+        items.append({
+            "filename": f"{stem}_{_safe_name(ws.title)}.xlsx",
+            "file_bytes": data,
+        })
+    return items
+
+
+def report_value(item, key):
+    """
+    上报/展示层取值（数据预览、汇总表、飞书表单统一走这里）。
+
+    业务规则：保险个人没有独立的飞书表列，上报时其金额合并计入
+    「个人其他调整」(adjustment)。校验层仍用原始 adjustment 与
+    personal_insurance 分别参与公式，避免重复计数。
+    """
+    val = item.get(key, "")
+    if key == "adjustment":
+        try:
+            merged = float(val or 0) + float(item.get("personal_insurance", 0) or 0)
+            return f"{merged:.2f}"
+        except (ValueError, TypeError):
+            return val
+    return val
+
+
 def _to_money(v):
     """把单元格值转成 round 到 2 位小数的 float；None/空/非数 → 0.0。"""
     if v is None:
@@ -849,7 +1016,7 @@ def get_validation_rules(validation_cfg, rule_set_name=None):
       2) 否则从顶级字段返回（向后兼容）
     如果指定规则集不存在，回退到 default 规则集或顶级字段并打 warning。
     返回 dict，包含 column_sum_checks / row_formulas / extra_summary_checks
-    / cross_row_formulas / percent_checks。
+    / cross_row_formulas / percent_checks / row_consistency_checks。
     """
     if rule_set_name is None or rule_set_name == "default":
         rule_sets = validation_cfg.get("rule_sets", {}) or {}
@@ -861,6 +1028,7 @@ def get_validation_rules(validation_cfg, rule_set_name=None):
                 "extra_summary_checks": rules.get("extra_summary_checks", validation_cfg.get("extra_summary_checks", [])),
                 "cross_row_formulas": rules.get("cross_row_formulas", validation_cfg.get("cross_row_formulas", [])),
                 "percent_checks": rules.get("percent_checks", validation_cfg.get("percent_checks", [])),
+                "row_consistency_checks": rules.get("row_consistency_checks", validation_cfg.get("row_consistency_checks", [])),
             }
         return {
             "column_sum_checks": validation_cfg.get("column_sum_checks", []),
@@ -868,6 +1036,7 @@ def get_validation_rules(validation_cfg, rule_set_name=None):
             "extra_summary_checks": validation_cfg.get("extra_summary_checks", []),
             "cross_row_formulas": validation_cfg.get("cross_row_formulas", []),
             "percent_checks": validation_cfg.get("percent_checks", []),
+            "row_consistency_checks": validation_cfg.get("row_consistency_checks", []),
         }
 
     rule_sets = validation_cfg.get("rule_sets", {}) or {}
@@ -879,6 +1048,7 @@ def get_validation_rules(validation_cfg, rule_set_name=None):
             "extra_summary_checks": rs.get("extra_summary_checks", []),
             "cross_row_formulas": rs.get("cross_row_formulas", []),
             "percent_checks": rs.get("percent_checks", []),
+            "row_consistency_checks": rs.get("row_consistency_checks", []),
         }
 
     logger.warning("Rule set '%s' not found, falling back to default config", rule_set_name)
@@ -1072,6 +1242,9 @@ def validate_payroll(parsed, validation_cfg, excel_cols, rule_set_name=None):
         col_key = spec.get("column")
         if not col_key:
             continue
+        # skip_if_missing: 该列在表头中不存在时跳过此校验（而非按 0 计）
+        if spec.get("skip_if_missing") and column_indices.get(col_key, -1) < 0:
+            continue
         require_col(col_key, "column_sum_checks")
         col_sum = sum(col_value(r, col_key) for r in data_rows)
         col_sum = round(col_sum, 2)
@@ -1103,6 +1276,14 @@ def validate_payroll(parsed, validation_cfg, excel_cols, rule_set_name=None):
         for k in rhs_minus:
             require_col(k, f"row_formulas[{name}].rhs_minus")
 
+        # skip_if_missing: 任一引用列在表头中不存在时跳过整条公式，
+        # 用于只对含新增列的模板生效的公式（如实发工资 = 实发工资1 - 保险个人）
+        if formula.get("skip_if_missing") and any(
+            column_indices.get(k, -1) < 0
+            for k in [lhs] + rhs_plus + rhs_minus
+        ):
+            continue
+
         def rhs_of(row):
             return round(
                 sum(col_value(row, k) for k in rhs_plus)
@@ -1110,24 +1291,37 @@ def validate_payroll(parsed, validation_cfg, excel_cols, rule_set_name=None):
                 2
             )
 
-        # B: 合计行
-        L = col_value(summary_row, lhs)
-        R = rhs_of(summary_row)
-        diff = round(L - R, 2)
-        passed = abs(diff) <= tolerance
-        checks.append({
-            "kind": "row_formula_summary",
-            "name": f"{name} (合计行)",
-            "lhs_value": L,
-            "rhs_value": R,
-            "diff": diff,
-            "passed": passed,
-            "detail": "" if passed else f"合计行 lhs={L:.2f}，rhs={R:.2f}，差 {diff:+.2f}"
-        })
+        # skip_rows_where_zero: 指定列取值为0的数据行视为特殊情况，跳过逐行校验
+        # （如食堂表中扣款合计为0、单位五险另走账的特殊员工行）
+        skip_zero_col = formula.get("skip_rows_where_zero")
 
-        # C: 每个数据行
+        def _is_special_row(r):
+            return skip_zero_col and abs(col_value(r, skip_zero_col)) <= tolerance
+
+        # B: 合计行（skip_summary_check=true 时跳过：
+        #    特殊行导致合计行两侧天然不平，由列加总及其余公式兜底）
+        if not formula.get("skip_summary_check"):
+            L = col_value(summary_row, lhs)
+            R = rhs_of(summary_row)
+            diff = round(L - R, 2)
+            passed = abs(diff) <= tolerance
+            checks.append({
+                "kind": "row_formula_summary",
+                "name": f"{name} (合计行)",
+                "lhs_value": L,
+                "rhs_value": R,
+                "diff": diff,
+                "passed": passed,
+                "detail": "" if passed else f"合计行 lhs={L:.2f}，rhs={R:.2f}，差 {diff:+.2f}"
+            })
+
+        # C: 每个数据行（行号按原数据行序号，保持各检查间可对照）
         failed_rows = []
+        total_rows = 0
         for ridx, r in enumerate(data_rows):
+            if _is_special_row(r):
+                continue
+            total_rows += 1
             L_r = col_value(r, lhs)
             R_r = rhs_of(r)
             d = round(L_r - R_r, 2)
@@ -1138,7 +1332,6 @@ def validate_payroll(parsed, validation_cfg, excel_cols, rule_set_name=None):
                     "rhs": R_r,
                     "diff": d,
                 })
-        total_rows = len(data_rows)
         passed_rows = total_rows - len(failed_rows)
         passed = len(failed_rows) == 0
         if passed:
@@ -1149,6 +1342,9 @@ def validate_payroll(parsed, validation_cfg, excel_cols, rule_set_name=None):
             )
             more = f"...（共 {len(failed_rows)} 行不通过）" if len(failed_rows) > 3 else ""
             detail = f"{passed_rows}/{total_rows} 行通过；失败例: {sample}{more}"
+        skipped_special = len(data_rows) - total_rows
+        if skipped_special:
+            detail += f"；{skipped_special} 行按特殊情况跳过"
         checks.append({
             "kind": "row_formula_rows",
             "name": f"{name} (每行)",
@@ -1157,6 +1353,60 @@ def validate_payroll(parsed, validation_cfg, excel_cols, rule_set_name=None):
             "failed_rows": failed_rows,
             "passed": passed,
             "detail": detail
+        })
+
+    # === D. 行级一致性检查 ===
+    # 如：扣款合计为0的行不应出现单位缴纳五险一金——出现即说明表做错
+    # （个人部分没扣、单位部分却计了成本），必须提示用户修改后才能提交。
+    for spec in rules.get("row_consistency_checks", []) or []:
+        name = spec.get("name", "<未命名行级一致性检查>")
+        when_col = spec.get("when_column")
+        then_col = spec.get("then_column")
+        if not when_col or not then_col:
+            continue
+        # 任一引用列在表头中不存在时跳过（模板没有该列）
+        if spec.get("skip_if_missing", True) and (
+            column_indices.get(when_col, -1) < 0
+            or column_indices.get(then_col, -1) < 0
+        ):
+            continue
+        require_col(when_col, f"row_consistency_checks[{name}]")
+        require_col(then_col, f"row_consistency_checks[{name}]")
+        when_label = col_label(when_col)
+        then_label = col_label(then_col)
+
+        failed_rows = []
+        for ridx, r in enumerate(data_rows):
+            when_val = col_value(r, when_col)
+            then_val = col_value(r, then_col)
+            if abs(when_val) <= tolerance and abs(then_val) > tolerance:
+                failed_rows.append({
+                    "row_label": _row_label(r, f"第 {ridx + 1} 行"),
+                    "when_label": when_label,
+                    "when_value": when_val,
+                    "then_label": then_label,
+                    "then_value": then_val,
+                })
+        total_rows = len(data_rows)
+        passed_rows = total_rows - len(failed_rows)
+        passed = len(failed_rows) == 0
+        if passed:
+            detail = f"{passed_rows}/{total_rows} 行通过"
+        else:
+            sample = "; ".join(
+                f"{f['row_label']}：{f['when_label']}=0 但 {f['then_label']}={f['then_value']:.2f}"
+                for f in failed_rows[:3]
+            )
+            more = f"...（共 {len(failed_rows)} 行）" if len(failed_rows) > 3 else ""
+            detail = f"{passed_rows}/{total_rows} 行通过；失败例: {sample}{more}——疑似表做错，请核对扣款合计与{then_label}"
+        checks.append({
+            "kind": "row_consistency",
+            "name": name,
+            "total_rows": total_rows,
+            "passed_rows": passed_rows,
+            "failed_rows": failed_rows,
+            "passed": passed,
+            "detail": detail,
         })
 
     extra_summary_values = parsed.get("extra_summary_values", {})
@@ -1409,6 +1659,9 @@ def append_validation_sheet(file_bytes, validation_result,
         "row_formula_summary": "横向公式",
         "row_formula_rows": "横向公式",
         "extra_summary_check": "额外汇总校验",
+        "cross_row_formula": "跨行公式",
+        "percent_check": "百分比校验",
+        "row_consistency": "行级一致性",
     }
 
     # 明细行
@@ -1484,7 +1737,7 @@ def build_summary_workbook(parsed_list, validation_results, tf_columns,
         ws.cell(row=i, column=1, value=p.get("filename", ""))
         ws.cell(row=i, column=2, value=p.get("year_month", ""))
         for cidx, col in enumerate(tf_columns, start=3):
-            v = p.get(col["key"], "")
+            v = report_value(p, col["key"])
             # 金额列尝试转 float，方便 Excel 求和/排序
             if isinstance(v, str):
                 try:
@@ -1540,7 +1793,7 @@ def build_summary_workbook(parsed_list, validation_results, tf_columns,
             total = 0.0
             has_num = False
             for p in parsed_list:
-                v = p.get(col["key"], "")
+                v = report_value(p, col["key"])
                 try:
                     total += float(v)
                     has_num = True
@@ -1584,6 +1837,9 @@ def build_summary_workbook(parsed_list, validation_results, tf_columns,
         "row_formula_rows": "横向公式",
         "signature_check": "签名栏",
         "extra_summary_check": "额外汇总校验",
+        "cross_row_formula": "跨行公式",
+        "percent_check": "百分比校验",
+        "row_consistency": "行级一致性",
     }
     cur = 4
     for p in parsed_list:
@@ -1730,18 +1986,44 @@ def main():
         st.info("请上传一个或多个 Excel 工资表文件")
         return
 
-    # Parse each file
+    # 拆分多 sheet 工作簿 + 解析：每个 sheet 作为独立文件进入后续流程
+    upload_items = []  # [{filename, file_bytes}]，提交时逐个上传
     parsed_list = []
     for upfile in uploaded_files:
         file_bytes = upfile.read()
         upfile.seek(0)
-        parsed = parse_excel(file_bytes, upfile.name)
-        if parsed:
-            parsed_list.append({"filename": upfile.name, **parsed})
+        try:
+            items = split_workbook_sheets(file_bytes, upfile.name)
+        except Exception as e:
+            st.error(f"⚠️ {upfile.name}：拆分工作表失败：{e}，按原文件处理")
+            items = [{"filename": upfile.name, "file_bytes": file_bytes}]
+        if len(items) > 1:
+            st.info(
+                f"📎 {upfile.name} 含 {len(items)} 个工作表，已自动拆分为独立文件："
+                + "、".join(it["filename"] for it in items)
+            )
+        upload_items.extend(items)
+        for item in items:
+            parsed = parse_excel(item["file_bytes"], item["filename"])
+            if parsed:
+                parsed_list.append({"filename": item["filename"], **parsed})
 
     if not parsed_list:
         st.error("未能解析任何文件，请检查格式")
         return
+
+    # 表头歧义保险：同一关键词命中多个表头列时无法可靠取数，
+    # 阻断提交并提示用户修改表头（如「实发工资1」改名「实得工资」）
+    ambiguity_found = False
+    for p in parsed_list:
+        for amb in p.get("ambiguity_errors", []):
+            ambiguity_found = True
+            matches_text = "、".join(amb["matches"])
+            st.error(
+                f"🚫 {p['filename']}：表头中有 {len(amb['matches'])} 列都包含「{amb['keyword']}」"
+                f"（{matches_text}），无法确定「{amb['label']}」取哪一列。"
+                f"请修改表头列名后重新上传（例如将「实发工资1」改为「实得工资」）。"
+            )
 
     flows_cfg = CONFIG.get("flows", {})
     detected_flow, flow_error = detect_batch_flow(parsed_list, flows_cfg)
@@ -1857,16 +2139,14 @@ def main():
     signature_check_blocked = False
 
     if required_sigs:
-        for upfile in uploaded_files:
-            file_bytes = upfile.read()
-            upfile.seek(0)
-            result = check_signatures(file_bytes, upfile.name, required_sigs)
-            signature_results[upfile.name] = result
+        for item in upload_items:
+            result = check_signatures(item["file_bytes"], item["filename"], required_sigs)
+            signature_results[item["filename"]] = result
             if not result["ok"]:
                 signature_check_blocked = True
                 missing_list = "、".join(result["missing"])
                 st.error(
-                    f"⚠️ {upfile.name}：缺少签名栏信息 — {missing_list}。"
+                    f"⚠️ {item['filename']}：缺少签名栏信息 — {missing_list}。"
                     f"请确保 Excel 文件中包含这些字段后再上传。"
                 )
     if val_cfg.get("enabled"):
@@ -1903,7 +2183,7 @@ def main():
     for p in parsed_list:
         row = {"文件名": p["filename"], "年月": p["year_month"]}
         for col in tf_columns:
-            row[col["label"]] = p[col["key"]]
+            row[col["label"]] = report_value(p, col["key"])
         sig_parts = []
 
         sr = signature_results.get(p["filename"])
@@ -1935,7 +2215,11 @@ def main():
         key=lambda x: float(x["transfer_total"]) if x["transfer_total"] else 0,
         reverse=True,
     )
-    unit_names = [p["unit_name"] for p in sorted_items]
+    # 单位名去重（保序）：多 sheet 拆分或多文件同单位时避免标题重复罗列
+    unit_names = []
+    for p in sorted_items:
+        if p["unit_name"] not in unit_names:
+            unit_names.append(p["unit_name"])
     amounts = [p["transfer_total"] for p in sorted_items]
     year_month = sorted_items[0]["year_month"] if sorted_items else ""
     title = generate_title(unit_names, year_month, amounts)
@@ -1983,7 +2267,7 @@ def main():
 
     # Submit button
     flow_error = st.session_state.get("flow_error")
-    final_blocked = submit_blocked or signature_check_blocked or bool(flow_error)
+    final_blocked = submit_blocked or signature_check_blocked or bool(flow_error) or ambiguity_found
     if submit_blocked:
         st.error("⚠️ 校验未通过且当前为严格模式，请修改 Excel 后重新上传")
     if st.button("提交审批", disabled=final_blocked):
@@ -1995,32 +2279,31 @@ def main():
             department_id = st.session_state.department_id
 
             file_codes = []
-            # 总步数 = 每个原附件 + 汇总表（如果生成成功） + 创建审批实例
-            total_steps = len(uploaded_files) + (1 if summary_bytes else 0) + 1
+            # 总步数 = 每个附件（含多 sheet 拆分后的独立文件）+ 汇总表（如果生成成功） + 创建审批实例
+            total_steps = len(upload_items) + (1 if summary_bytes else 0) + 1
             done_steps = 0
-            for i, upfile in enumerate(uploaded_files):
-                status_text.text(f"正在上传：{upfile.name} ...")
-                file_bytes = upfile.read()
-                upfile.seek(0)
+            for i, item in enumerate(upload_items):
+                status_text.text(f"正在上传：{item['filename']} ...")
+                file_bytes = item["file_bytes"]
 
                 # 若启用了 write_back_sheet，把校验结果作为新 sheet 追加到 Excel 后再上传
-                vr = validation_results.get(upfile.name)
+                vr = validation_results.get(item["filename"])
                 if (vr is not None
                     and val_cfg.get("enabled")
                     and val_cfg.get("write_back_sheet", True)
-                    and not upfile.name.lower().endswith(".xls")):
+                    and not item["filename"].lower().endswith(".xls")):
                     file_bytes = append_validation_sheet(
                         file_bytes,
                         vr,
                         sheet_name=val_cfg.get("write_back_sheet_name", "验证结果"),
-                        source_filename=upfile.name,
+                        source_filename=item["filename"],
                     )
 
                 import tempfile
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
                     tmp.write(file_bytes)
                     tmp_path = tmp.name
-                file_code = client.upload_file_to_feishu(tmp_path, filename=upfile.name)
+                file_code = client.upload_file_to_feishu(tmp_path, filename=item["filename"])
                 os.unlink(tmp_path)
                 if file_code:
                     file_codes.append(file_code)
